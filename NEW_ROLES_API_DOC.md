@@ -247,7 +247,7 @@ Content-Type: application/json
   "userId": "65a1f0000000000000000001",
   "roleSlug": "pic-parish",
   "parishCode": "211003",
-  "note": "Covering while the substantive PIC is on sabbatical"
+  "note": "Covering while the substantive PIC is on leave"
 }
 ```
 
@@ -420,31 +420,4 @@ This feature changes **what the token says**, and therefore what a correct
 frontend asks for. It is not a server-side access-control boundary. Server-side
 narrowing is built but inert behind `SCOPE_ENFORCEMENT` — see below.
 
----
 
-## Deployment notes
-
-**Indexes.** Production runs with `MONGO_AUTO_INDEX=false`, so indexes are created
-by the organisation init endpoint, which now also covers
-`secondaryRoleAssignments` and `activeRoleSessions`:
-
-```bash
-# dry run first — reports what it would create, changes nothing
-curl -X POST -H "x-api-key: $ORG_INIT_KEY" \
-  "$API_HOST/v1/org/departments/admin/init-organisation-3772a278t7388?dryRun=true"
-
-# apply
-curl -X POST -H "x-api-key: $ORG_INIT_KEY" \
-  "$API_HOST/v1/org/departments/admin/init-organisation-3772a278t7388"
-```
-
-The operation is idempotent — a second run reports nothing created.
-
-**New collections**, both created on first write:
-
-| Collection | Holds |
-|---|---|
-| `secondaryRoleAssignments` | the grants; rows are never deleted |
-| `activeRoleSessions` | one row per session, TTL-reaped with the refresh lifetime |
-
-**`SCOPE_ENFORCEMENT`** is not yet read by any request path. Leave it unset.
