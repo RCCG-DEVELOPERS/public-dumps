@@ -78,11 +78,16 @@ chain is whatever its members agree on.
 | region | `regionCode` | `rhq` |
 | sub-continent | `subContinentCode` | `schq` |
 | continent | `continentCode` | `chq` |
-| parish | `parishCode` | `parish` |
+| parish | `parishCode` | — |
 
-**A unit's chain is derived from its members, never from its HQ row.** 131 units
-carry more than one HQ flag and 29 carry none, so the HQ row is neither unique nor
-guaranteed to exist. If a unit's members disagree about their ancestors, every
+> **`parish` is not an HQ flag**, despite sitting in the same group of columns.
+> It marks a row as a real parish (`"1"`) rather than a department (`"0"`), so
+> that filtering on `parish: "1"` excludes departments. A parish is the leaf of
+> the tree and has nothing beneath it to head. See `HQ_ASSIGNMENT_DOCS.md`.
+
+**A unit's chain is derived from its members, never from its HQ row.** 130 units
+carry more than one HQ flag and 127 carry none, so the HQ row is neither unique
+nor guaranteed to exist. If a unit's members disagree about their ancestors, every
 operation on it is **refused** rather than resolved by majority — picking one
 would silently rewrite the chain of everything inside it.
 
@@ -140,6 +145,11 @@ move broke.
 > **The chains decide, not the request.** Authority is evaluated after the source
 > and destination chains are resolved from the database, so a caller cannot assert
 > a province they are not in.
+
+The same standing rule now bounds **promotion** and **realignment** through
+`POST /scoped/promote` and `POST /scoped/realign` — see
+[HIERARCHY_SCOPED_OPERATIONS_DOCS.md](HIERARCHY_SCOPED_OPERATIONS_DOCS.md). The
+unbounded `/promote` and `/admin/realign` stay super-admin.
 
 ### GET /v1/hierarchy-transfers/units
 
@@ -319,6 +329,9 @@ code sitting under two parents cannot be moved until that is settled.
 ### POST /v1/hierarchy-transfers/promote
 
 Raises a unit one level. **This is the only operation that mints a code.**
+Super-admin. An officer promoting within their own unit uses
+[`/scoped/promote`](HIERARCHY_SCOPED_OPERATIONS_DOCS.md#post-v1hierarchy-transfersscopedpromote)
+instead — same body, bounded by standing, no `absorbCodes`.
 
 ```json
 { "fromLevel": "parish", "unitCode": "211343",
@@ -332,7 +345,7 @@ Raises a unit one level. **This is the only operation that mints a code.**
 | `newCode` | **required for province and above** — see below |
 | `absorbCodes` | other units at `fromLevel` to bring into the new unit; max 500 |
 
-**Codes are minted for `area` and `zone` only**, as `AR`/`ZN` + 10 random digits —
+**Promotion mints for `area` and `zone` only**, as `AR`/`ZN` + 10 random digits —
 the shape 95.9% and 95.8% of production already uses. Province and above are
 **not** generated: `LA47`, `R36`, `CNT03SUBCNT01` are meaningful rather than
 random, so inventing a scheme from four sample formats would be a guess with no
@@ -343,10 +356,132 @@ says so.
 > `AR0000000009` … `AR8812349660`. A `max + 1` allocator would look plausible and
 > be wrong.
 
+**Parish codes are minted too, but on creation rather than promotion.**
+`POST /v1/parishDirectory` discards any `parishCode` in the request body and
+issues its own — six bare digits with a leading digit of 2-9, the shape 53,020 of
+the 53,048 live codes use. The remaining 28 follow a second scheme,
+`RCCGP` + 10 digits; the majority shape was chosen because a generated code has
+to look like the ones beside it. Say so if the `RCCGP` form is the intended
+direction and it is a one-line change.
+
+The space is 800,000 wide and 6.6% used, so collisions are rare and retried. The
+claim is the registry insert, not a prior read, so two simultaneous creates
+cannot be issued the same code.
+
+### POST /v1/hierarchy-transfers/admin/realign
+
+**The repair for a split unit.** Super-admin only.
+
+#### How a unit gets split
+
+Move a parish that holds `phq` out to another region and **only that one row
+changes**. A parish is a leaf, so the cascade's radius — every row carrying the
+moved unit's own code — is the parish itself. Nothing in this module reads HQ
+flags, so it has no notion that the row it just moved *represented* a province.
+The province was never the subject of the operation.
+
+The result: one `provinceCode` pointing at two different `regionCode`s. Every
+other parish in the province, and every user under it, still names the old
+region.
+
+**And then nothing can fix it.** `resolveUnitChain` refuses a unit whose members
+disagree, `planTransfer` resolves the source through it, so every `/transfer`,
+`/admin/move` and `/preview` touching that province now returns `409
+INCONSISTENT_UNIT`. The split is both the damage and the lock on the door. This
+endpoint is the one way through it.
+
+#### The request
+
+```bash
+curl -X POST -H "Authorization: Bearer $SUPER_JWT" \
+  -H 'Content-Type: application/json' \
+  -d '{"level":"province","unitCode":"LA47","toLevel":"region","toCode":"R12","dryRun":true}' \
+  "$API_HOST/v1/hierarchy-transfers/admin/realign"
+```
+
+`toLevel` **must be the immediate parent** of `level`. Not tidiness: the
+destination chain carries the named level and its ancestors only, so naming a
+*grand*parent would leave `regionCode` absent from it and the patch would write
+`regionCode: ""` to every parish and every user — worse than the split.
+
+#### The dry run, which you should always read first
+
+```jsonc
+{
+  "dryRun": true,
+  "level": "province", "unitCode": "LA47",
+  "destination": { "level": "region", "code": "R12", "name": "REGION 12" },
+  "variants": [
+    { "memberCount": 43, "matchesDestination": false,
+      "chain": { "regionCode": "R07", "regionName": "REGION 7", "…": "…" },
+      "samples": ["211549", "211550", "211551"] },
+    { "memberCount": 1, "matchesDestination": true,
+      "chain": { "regionCode": "R12", "…": "…" },
+      "samples": ["211001"] }
+  ],
+  "inherited": { "regionCode": "R12", "regionName": "REGION 12", "…": "…" },
+  "cascade": {
+    "membersMatched": 44, "departmentsMatched": 3, "usersMatched": 512,
+    "wouldChange": 43,
+    "usersUnreachable": 6
+  },
+  "officesAtRisk": [ { "username": "…", "roleSlug": "reg-admin", "scopeCode": "R07" } ]
+}
+```
+
+`variants` is the whole point — it names both sides of the split, how many rows
+each holds, and sample parish codes from each. **Which side wins is your
+decision, and it is not recoverable from the data afterwards.**
+
+Then the same call with `"dryRun": false`.
+
+#### Three things it does differently from a transfer
+
+| | Why |
+|---|---|
+| **Does not require the source to be consistent** | That is the condition it exists to end. The destination is still held to the normal standard — realigning onto a parent that is itself split would just copy one of *its* two answers down. |
+| **Includes departments** | `memberFilter` excludes `parishType: "DEPARTMENT"`, which is right for a transfer — departments are not places. For a repair it is wrong: a department row carrying the old ancestry leaves the unit still split. Counted separately as `departmentsMatched`. |
+| **Never ends a principal office** | A transfer *moves* a unit and vacates offices at the units left behind. A realign corrects the record of a move that already happened; ending an appointment as a side effect of a data repair is destructive and irreversible, and a split unit has no single "previous" ancestry to have left. Offices at risk are listed and left standing — review them and end or transfer each through `/v1/principal-officers` if that is right. |
+
+#### usersUnreachable
+
+Users whose `parish` is in the unit but whose own `province` column is blank or
+names something else. They are **counted and not written** — this endpoint
+matches on the unit column alone. Fix their profile, then re-run. It is `null`
+with a note when the unit has more than 5,000 member rows, since the count needs
+an `$in` over every member parish code and a diagnostic must not be the most
+expensive part of the request.
+
+#### Cost
+
+`users` declares no index on any hierarchy column and `parishDirectory` indexes
+only `parishCode`, so both `updateMany` calls are collection scans. The existing
+transfer cascade costs exactly the same — but run this off-peak. There are no
+transactions either, so a crash between the two writes leaves parishes moved and
+users behind; the `hierarchyChangeJobs` row records where it stopped, and
+re-running finishes it, since `$set` to a fixed value is idempotent.
+
 ### GET /v1/hierarchy-transfers/integrity
 
 Read-only. **Run this before anything else** — every fault it lists makes a
 transfer either refuse or act on the wrong record.
+
+`splitUnits.records` now names the offending unit **codes**, not just how many
+there are, so the list can be worked through with `/admin/realign` and re-read
+afterwards to confirm it reached zero:
+
+```jsonc
+"splitUnits": {
+  "records": [
+    { "level": "province", "count": 3, "truncated": false,
+      "codes": [ { "unitCode": "LA47", "variants": 2 } ] }
+  ]
+}
+```
+
+Capped at 50 codes per level; `count` is always the true total. Only **active**
+members are compared here, so a split living entirely among inactive rows is not
+counted — the realign dry run compares every row.
 
 ```json
 {
@@ -379,6 +514,13 @@ re-running the same operation finishes the job rather than applying it twice.
 Registers every code already in use so a minted one can never collide with a
 legacy one. Idempotent. **Must be run before the first promotion.**
 
+**Now includes parish.** It used to skip that level, on the grounds that nobody
+is allocated into a parish and `parishCode` had no working uniqueness anyway.
+Both halves have changed, so this run registers roughly 53,000 additional codes —
+expect the parish row to dominate the dry-run output. Departments are counted at
+parish level (a department row still occupies a `parishCode`) and excluded at
+every level above, where they are not places.
+
 ```bash
 curl -X POST -H "Authorization: Bearer $SUPERADMIN_JWT" \
   "$API_HOST/v1/hierarchy-transfers/admin/backfill-codes?dryRun=true"
@@ -394,8 +536,9 @@ curl -X POST -H "Authorization: Bearer $SUPERADMIN_JWT" \
 | `EMPTY_UNIT` | `400` | No active, non-department member carries that code |
 | `UNKNOWN_LEVEL` | `400` | Not one of the seven levels |
 | `ALREADY_THERE` | `400` | The unit is already under that parent |
+| `ALREADY_ALIGNED` | `400` | `admin/realign` found nothing to collapse — every variant already matches the destination. Note this needs EVERY variant to match; a mostly-agreeing unit is the normal case for a realign and is not refused. |
 | `NO_PARENT_LEVEL` | `400` | A continent cannot be transferred or promoted |
-| `DESTINATION_NOT_PARENT_LEVEL` | `400` | `admin/move` was given a destination that is not the unit's immediate parent level. `detail` names the level expected. |
+| `DESTINATION_NOT_PARENT_LEVEL` | `400` | `admin/move` or `admin/realign` was given a destination that is not the unit's immediate parent level. `detail` names the level expected. |
 | `IDENTITY_VIOLATION` | `400` | The patch would write the moved unit's own code. Should be unreachable. |
 | `CODE_REQUIRED` | `400` | Promotion above zone needs `newCode` supplied |
 | `CODE_TAKEN` | `400` | The supplied code is already in use |
@@ -406,14 +549,13 @@ curl -X POST -H "Authorization: Bearer $SUPERADMIN_JWT" \
 
 ## Known data faults
 
-Measured in production, and the reason for several design choices:
-
-Re-measured 2026-09-11. Every one of these is listed row by row, with codes and
+Measured in production, and the reason for several design choices. Re-measured
+2026-09-11. Every one of these is listed row by row, with codes and
 names, in **`PARISH_HIERACHY_CONFLICT.md`**.
 
 | | |
 |---|---|
-| Duplicate `parishCode` | **1** — down from 11 after the re-coding; still blocks the unique index |
+| Duplicate `parishCode` | **0** — all re-coded; the unique index can now build |
 | Units with more than one HQ flag | **130** — continent 7, sub-continent 6, region 37, province 16, zone 19, area 45 |
 | Units with **no** HQ flag | **127** — continent 3, sub-continent 3, region 2, province 11, zone 43, area 65 |
 | Headquarters missing a flag beneath them | **629** across 15 combinations; `rhq` without `phq` alone is 131 |
@@ -467,14 +609,25 @@ curl -H "x-api-key: $ORG_INIT_KEY" \
   "$API_HOST/v1/hierarchy-transfers/integrity"
 ```
 
-Seven new indexes: `hierarchyCodeRegistry` (unique), `hierarchyChangeJobs`,
+Indexes created: `hierarchyCodeRegistry` (unique), `hierarchyChangeJobs`,
 `parishDirectory` × 2 (`area_members`, `zone_members`), `users` × 2
-(`user_by_parish`, `user_by_area`).
+(`user_by_parish`, `user_by_area`), plus the six headquarters indexes
+(`hq_continent` … `hq_area`).
 
-> **`PATCH /v1/parishDirectory/:id` still bypasses all of this.** It accepts every
-> hierarchy field, `$set`s the raw request body, and sits behind
-> `isAuthenticatedOrApiKey`. Closing it is a breaking change and is deliberately
-> out of scope — but it means this module is the *safe* path, not the *only* one.
+`{ parishCode: 1 }` unique is attempted last. Init **counts duplicates first** and
+skips the build, reporting them, rather than failing on a single `E11000`. There
+are none today, so it builds.
+
+> **`PATCH /v1/parishDirectory/:id` still bypasses the inheritance rule.** It
+> accepts every hierarchy field and `$set`s the raw request body, so a caller can
+> still write a `provinceCode` that contradicts the rest of the chain. Closing
+> that is a breaking change and remains out of scope.
+>
+> Its **headquarters** columns are no longer open, though: `restrictHqFlagWrites`
+> now requires super-admin for any request carrying `chq`, `schq`, `rhq`, `phq`,
+> `zhq`, `ahq` or `parish`. A request touching none of them is unaffected. Watch
+> the activity log for `UPDATE_PARISH` / `DENIED` after release, in case an
+> API-key caller was relying on it.
 
 ---
 

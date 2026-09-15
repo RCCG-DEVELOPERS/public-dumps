@@ -43,6 +43,21 @@ same as being the officer — the register (`principalOfficeHolders`) decides th
 | sub-continent | `sco`, `asco`, `sub-cont-admin`, `sub-cont-accountant`, `sub-cont-ict`, `training-manager` |
 | continent | `co`, `aco`, `cont-admin`, `cont-accountant` |
 
+> **`training-manager` is an office, but not an administrative one.** It is
+> listed here because it is a single-holder post — one per sub-continent, as the
+> table says. It carries **no administrative authority** at that level: it cannot
+> write geofencing rules, grant exemptions, appoint principal officers, move
+> units, assign headquarters or approve transfers. Its remit is training, and it
+> may create and manage the training managers under it. Enforced by
+> `NON_ADMINISTRATIVE_ROLES` in `src/utils/officerAuthority.ts`, which
+> `standingOf` consults so all six authority surfaces inherit it, and which is
+> set from `NON_ADMINISTRATIVE_ROLES` in the environment.
+>
+> Region, province, zone, area and parish training managers are planned. **Each
+> new slug must be added to that list** or it will silently inherit
+> administrative authority at its own level.
+
+
 The parish, area and zone tier is **not** included.
 
 **One person may hold offices at several units.** The uniqueness is per (role,
@@ -242,6 +257,14 @@ GET /v1/principal-officers/conflicts?roleSlug=prov-admin&pageSize=100
 > `node scripts/analysePrincipalOffices.js --contested`.
 
 ---
+
+> **Superseded for anything beyond a quick look.**
+> [`GET /v1/principal-officers/register-audit`](PRINCIPAL_OFFICE_AUDIT_DOCS.md)
+> scans every user rather than the first hundred, reports the mirror faults
+> too — appointments whose holder no longer carries the role, and primary
+> appointments at a unit the holder has left — and pairs with
+> `POST /admin/strip-roles` to act on what it finds.
+
 
 ### POST /v1/principal-officers
 
