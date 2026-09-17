@@ -32,6 +32,7 @@ than a gap in the data.
 - [When a pastor leaves](#when-a-pastor-leaves)
 - [Only the current pastor may act](#only-the-current-pastor-may-act)
 - [Principal officers — the role follows too](#principal-officers--the-role-follows-the-appointment-too)
+- [Who decides an officer appointment](#who-decides-an-officer-appointment)
 - [Change history](#change-history--the-four-records-read-together)
 - [Finding a person](#finding-a-person)
 - [All error codes](#all-error-codes)
@@ -467,6 +468,53 @@ findable, and fixed by appointing again.
 
 ---
 
+## Who decides an officer appointment
+
+Raising a principal-officer request and deciding it are different powers. Anyone
+with standing may raise one; deciding it happens **from above the office**.
+
+| Approver | A province office in their region | A province office elsewhere | A region office |
+|---|---|---|---|
+| Super Admin | ✅ | ✅ | ✅ |
+| National Support | ✅ | ✅ | ✅ |
+| Region Admin (R07) | ✅ | ❌ | ❌ |
+| Province Admin (LA47) | ❌ *even their own* | ❌ | ❌ |
+| Area Admin | ❌ | ❌ | ❌ |
+
+**Two conditions, both required.** The approver must stand at a level *strictly
+senior* to the office, **and** their unit must contain it. Seniority alone would
+let a regional admin decide an appointment in another region; containment alone
+would let a province admin decide a province office — which is precisely the
+conflict of interest the approval step exists to prevent.
+
+This is why **a province admin cannot decide a province-level appointment even in
+their own province**. It is not an oversight in the scope check; it is the point.
+
+### It is judged on a snapshot
+
+The office's ancestry is resolved and stored on the request when it is **raised**,
+beside `planSnapshot`. Deciding therefore asks about the hierarchy as it stood
+when the request was made, not as it stands days later when somebody gets to it.
+
+**A request raised before this existed has no snapshot and stays an unbounded
+decision.** That is deliberate: it was raised under the old rule, and opening it
+up retroactively would change the terms after the fact.
+
+### Refusal
+
+```json
+{
+  "status": 403,
+  "code": "NOT_AUTHORISED_TO_DECIDE",
+  "message": "An officer change is approved from above the office — an administrator of a level senior to it, whose unit contains it — or by a super-admin or national support. An administrator at the office's own level may not."
+}
+```
+
+Self-approval is still refused for everyone but a super-admin, senior standing or
+not.
+
+---
+
 ## Change history — the four records, read together
 
 ```
@@ -674,10 +722,10 @@ records that answer "who agreed to this" under traffic. Read it directly at
 lists, so a stable offset across them would mean reading all four in full. Ask
 for what you need and filter.
 
-**Officer approvals are still super-admin and national support only.** A
-regional admin can raise one; only an unbounded caller decides it. Widening that
-to the administrator of the office's own scope is a privilege change and is not
-made here.
+**An officer approval still cannot be decided at the office's own level.** See
+[Who decides an officer appointment](#who-decides-an-officer-appointment) — that
+is the conflict of interest the rule exists to prevent, and delegating upward did
+not change it.
 
 **Name search is a prefix, and it is not a seek.** A case-insensitive regex takes
 no tight index bounds even when anchored — measured, both `/^ade/i` and `/ade/i`
