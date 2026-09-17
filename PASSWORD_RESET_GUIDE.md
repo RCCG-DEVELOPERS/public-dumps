@@ -1,309 +1,776 @@
-# Password reset and change — the operator guide
+# Password reset — endpoint guide
 
-Who can change whose password, how the OTP flow behaves after the September 2026
-hardening, and what is groundwork rather than working code.
+Every way a password can be set in this system, who may do it, what to send and
+what comes back.
 
-Companion to [PASSWORD_RESET_DB_GUIDE.md](PASSWORD_RESET_DB_GUIDE.md), which
-covers the database and deploy side — indexes, the `roles.sensitive` flag, the
-API-key widening. This one covers the endpoints and the rules.
+## Read this first
 
-- [The short version](#the-short-version)
-- [What actually exists today](#what-actually-exists-today)
-- [Self-service reset by OTP](#self-service-reset-by-otp)
-- [What changed in the OTP flow](#what-changed-in-the-otp-flow)
-- [Changing your own password while signed in](#changing-your-own-password-while-signed-in)
-- [Forcing a password change](#forcing-a-password-change)
-- [Who may reset whom — the design](#who-may-reset-whom--the-design)
-- [The open gap](#the-open-gap)
-- [Configuration](#configuration)
-- [Known gaps](#known-gaps)
+Eight endpoints, all of them built. Three groups.
 
----
-
-## The short version
-
-| I want to… | Endpoint | Who |
+| Group | Endpoints | Who calls them |
 |---|---|---|
-| Reset a forgotten password | `POST /auth/request-password-reset` then `POST /auth/reset-password` | anyone, unauthenticated |
-| Change my own password | `POST /auth/change-password` | any signed-in user |
-| Make one user set a new password | `PATCH /v1/users/:id/force-password-change` | **super-admin only** |
-| Make everyone set a new password | `POST /auth/password-policy` | **super-admin only** |
-| Reset *another* user's password as their administrator | **does not exist yet** | — |
+| **Self-service** | request a code, reset with it, change your own password | Anybody |
+| **Administrative** | check eligibility, reset someone's password | Administrators over their own hierarchy |
+| **Support** | look a request up, step up, read a code out | Super admin and national support only |
 
-**There is no scoped administrator reset.** A province or region administrator
-cannot today reset a password for someone in their unit. The `roles.sensitive`
-groundwork for it has shipped; the endpoint has not. See
-[Who may reset whom](#who-may-reset-whom--the-design).
+Every path below is mounted under the API host. The administrative and support
+endpoints all sit under `/v1/password-resets`, on their own router.
 
 ---
 
-## What actually exists today
+## Contents
 
-Three real paths, and one that should not be a path at all.
-
-1. **Self-service OTP**, unauthenticated, by email or phone.
-2. **Change your own password**, signed in, with your current password.
-3. **Force someone to change theirs** — super-admin only. Sets a flag; it does
-   not set a password.
-4. **`PATCH /v1/users/:id` with a `password` field** — which any signed-in user
-   can call against any account. This is not a feature. See
-   [The open gap](#the-open-gap).
-
----
-
-## Self-service reset by OTP
-
-Two unauthenticated calls, mounted at both `/auth` and `/v1/auth`.
-
-### Step 1 — ask for a code
-
-```
-POST /v1/auth/request-password-reset
-{ "email": "someone@example.org" }          // or { "phone": "08031234567" }
-```
-
-`200 { "success": true, "message": "OTP sent to someone@example.org" }`
-
-The phone form matches against the **username** column, not a phone column — the
-account's login username is the number. If the account also has an email on its
-profile, a phone request sends the code to both.
-
-Refusals, all `400 { "success": false, message }`:
-
-| Message | Meaning |
-|---|---|
-| `Email does not exist` | no account with that email |
-| `Phone number does not exist as a login username` | no account whose username is that number |
-| `Email or phone is required` | neither field sent |
-| `Too many failed attempts. Try again after N minute(s).` | locked out — see below |
-| `We could not send your code right now. Please try again shortly.` | the code was generated but no channel delivered it |
-
-> **That last one is honest, not broken.** The OTP row exists; nothing reached
-> the user. It means the mail provider is unconfigured or refused. Check
-> `RESEND_API_KEY` before treating it as a user problem.
-
-### Step 2 — use it
-
-```
-POST /v1/auth/reset-password
-{ "email": "someone@example.org",
-  "otp": "048213",
-  "newPassword": "a longer passphrase",
-  "confirmPassword": "a longer passphrase" }
-```
-
-`200 { "success": true, "message": "Password reset successful — 3 other session(s) signed out." }`
-
-Refusals: `Passwords do not match`, `User not found`,
-`New password must be at least 8 characters long`, `Invalid or expired OTP`, and
-the same lockout message.
-
-**Every session is revoked on success**, the caller's included — a password
-reset is what you do when you think someone else has your account, so nothing
-survives it. A password *change* (below) keeps your own session.
-
-### The numbers
-
-| | |
-|---|---|
-| Code length | 6 digits, leading zeros kept |
-| Generated by | CSPRNG, digit by digit |
-| Valid for | **15 minutes** |
-| Wrong attempts allowed | **5** |
-| Lockout after that | **30 minutes**, per identifier |
-| Live codes per identifier | **exactly 1** |
-
-The lockout is counted in the database, per email or phone — not per IP, and not
-in process memory. That is deliberate: the API runs several Fargate tasks, and an
-in-memory counter would reset every deploy and be trivially evaded by hitting a
-different task.
+- [Who can do what](#who-can-do-what)
+- [Request a reset code](#request-a-reset-code)
+- [Reset with the code](#reset-with-the-code)
+- [Change your own password](#change-your-own-password)
+- [Force someone to change their password](#force-someone-to-change-their-password)
+- [Check whether you may reset someone](#check-whether-you-may-reset-someone)
+- [Reset someone's password](#reset-someones-password)
+- [Find a reset request](#find-a-reset-request)
+- [Read the code out to a caller](#read-the-code-out-to-a-caller)
+- [Rules that decide every reset](#rules-that-decide-every-reset)
+- [All error codes](#all-error-codes)
+- [Frontend guidance](#frontend-guidance)
+- [What this does not do](#what-this-does-not-do)
 
 ---
 
-## What changed in the OTP flow
+## Who can do what
 
-The September 2026 hardening. Four behaviours were described in the code and
-never actually happened.
+Reading down: can the person on the left reset the password of the person along the top?
 
-**1. Asking again no longer leaves the old code usable.** Previously, N requests
-left N live codes, and the chance of guessing one grew with every request. Now
-requesting a code retires every outstanding one for that identifier, so there is
-never more than one live code.
+| Actor | Member in their unit | Admin one level below | Peer admin | Admin above | Sensitive role | Themselves |
+|---|---|---|---|---|---|---|
+| Super Admin | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| National Support | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ |
+| Continent Admin | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Sub-Continent Admin | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Regional Admin | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Province Admin | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Parish Pastor (`pic-parish`) | ✅ own parish only | — | ❌ | ❌ | ❌ | ❌ |
+| Area Admin | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Zone Admin | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 
-**2. Re-requesting no longer wipes the attempt counter.** The attempt count is
-carried forward onto the new code. Asking for a fresh code was a way to clear
-four failed guesses and start again; it is not any more.
+Four things this table is saying.
 
-**3. The lockout is actually enforced.** It was written and commented out at both
-enforcement points. It now applies when a code is requested *and* when one is
-presented, so a locked identifier cannot issue itself a fresh code to get around
-the lock.
+**A parish pastor reaches their own parish and nothing else.** Every member
+whose `parish` code equals the pastor's own. Not the next parish, not the area,
+not the zone. If a member has no parish code on their record, the pastor cannot
+reach them.
 
-**4. Delivery is reported rather than assumed.** The endpoint used to answer
-`"OTP sent"` whether or not anything had been sent — when `RESEND_API_KEY` was
-absent, `sendMail` returned silently and the user waited for a message nobody
-had tried to deliver. The answer now reflects what actually happened.
+**Area and zone administrators cannot reset anyone.** That was a decision, not
+an oversight. They can still raise it with the province.
 
-Also new: the reset path enforces the 8-character minimum (it previously enforced
-nothing), revokes every session on success, and stamps `passwordChangedAt`.
+**Nobody resets a peer.** A province admin cannot reset another province admin,
+even one inside their own region. That takes a regional admin, national support
+or a super admin.
 
-> **Deployment note.** Because delivery now decides the answer, an environment
-> with no `RESEND_API_KEY` returns `success: false` for every email reset. That
-> is correct behaviour, but it means the key is now load-bearing for the flow
-> rather than merely nice to have.
+**National Support is bound by the sensitive rule.** They can reset a regional
+admin, but not the National Treasurer. Only a super admin can. See
+[Rules that decide every reset](#rules-that-decide-every-reset).
 
----
-
-## Changing your own password while signed in
-
-```
-POST /v1/auth/change-password
-Authorization: Bearer <token>
-{ "currentPassword": "...", "newPassword": "...", "confirmPassword": "..." }
-```
-
-**The subject comes from the token, never from the body or URL.** You can only
-change your own password here, and there is no field that says otherwise.
-
-Rules, each `400`: all three fields required; new passwords must match; at least
-8 characters; must differ from the current one; and the current one is verified
-against the stored hash (`Current password is incorrect`).
-
-On success every *other* session is revoked and yours is kept.
-
-There is a second, older endpoint — `POST /v1/users/:id/change-password` — which
-does the same thing and refuses outright unless `:id` is your own user id. Prefer
-`/auth/change-password`; the legacy one exists because clients still call it.
+Nobody resets their own password through an administrative endpoint. Use
+[change your own password](#change-your-own-password) instead.
 
 ---
 
-## Forcing a password change
+## Request a reset code
 
-Two ways in, one behaviour out.
-
-**One user** — super-admin only:
-
-```
-PATCH /v1/users/:id/force-password-change
-{ "required": true, "reason": "Handset lost" }
-```
-
-**Everyone at once** — super-admin only:
+Someone has forgotten their password and wants a code sent to them. No login
+required.
 
 ```
-POST /v1/auth/password-policy
-{ "forceAll": true, "reason": "Signing key rotated" }
+POST /auth/request-password-reset
 ```
 
-A forced user can still sign in. Their login response carries
-`passwordChangeRequired: true` and a `passwordChangeReason`, and **every other
-authenticated request answers `403`** with:
+**Who** Anyone. No token.
+
+### Request
+
+Send **either** `email` **or** `phone`, not both.
 
 ```json
-{ "code": "PASSWORD_CHANGE_REQUIRED", "reason": "ADMIN_REQUIRED" }
+{
+  "email": "pastor.adeyemi@rccg.org"
+}
 ```
 
-Three possible reasons:
+```json
+{
+  "phone": "08031234567"
+}
+```
 
-| Reason | Cause |
+> **`phone` must be the person's login username, not any phone number on their
+> profile.** The lookup is `username = phone`. If they log in with an email
+> address, sending their mobile number here returns "does not exist".
+
+### Response — 200
+
+```json
+{
+  "success": true,
+  "message": "OTP sent to pastor.adeyemi@rccg.org",
+  "reference": "PR-4K7MQ-2XB9T"
+}
+```
+
+**Show the reference to the user.** It is what support asks for when the code
+does not arrive, and it authenticates nothing on its own, so it is safe to
+display, print and read aloud. It is absent only if the support record could not
+be written, which never blocks the reset itself.
+
+Requesting by phone also emails the code if the account carries an email
+address, and the message says so:
+
+```json
+{
+  "success": true,
+  "message": "OTP sent to 08031234567, and email (if available on your portal profile)."
+}
+```
+
+### Response — 400
+
+```json
+{ "success": false, "message": "Email does not exist" }
+```
+
+| Message | Cause |
 |---|---|
-| `ADMIN_REQUIRED` | a super-admin set the flag on that user |
-| `GLOBAL_POLICY` | `forceAll` was set, and this password predates it |
-| `SIGNING_KEY_ROTATED` | their token verified against the retired `SECRET_PREVIOUS` key |
+| `Email does not exist` | No account with that email |
+| `Phone number does not exist as a login username` | The number is not their username |
+| `Email or phone is required` | Neither field sent |
+| `Too many failed attempts. Try again after 27 minute(s).` | Locked out from five wrong codes |
+| `We could not send your code right now. Please try again shortly.` | No delivery channel succeeded |
 
-Only these routes stay open while flagged: `change-password`, `logout` and
-`logout-all`. The flag is cleared by any successful password change or reset.
+That last one is important. It means the code was created but **no email or SMS
+went out**. Do not tell the user to check their inbox. Ask them to try again.
 
-Forcing a change deliberately does **not** revoke sessions — the user keeps a
-working token precisely so they can reach `change-password` with it.
+### What happens behind it
+
+- A six-digit code is generated with a cryptographic random source.
+- It is valid for **15 minutes**.
+- **Every earlier unused code for that identifier is retired.** Only the newest
+  one works, so a person who clicks "resend" three times has one live code, not
+  three.
+- The failed-attempt count **carries across** a new request. Asking for a fresh
+  code does not clear a lockout.
+
+### Use case
+
+> A pastor cannot sign in. The app shows "Forgot password", they type their
+> email, and this is called. They get a six-digit code by email and have fifteen
+> minutes to use it.
 
 ---
 
-## Who may reset whom — the design
+## Reset with the code
 
-**None of this is enforced yet**, because the endpoint it would guard does not
-exist. It is recorded here so the design is not relearned later, and because the
-`roles.sensitive` half has already shipped to the database.
+```
+POST /auth/reset-password
+```
 
-Two independent rules were intended to combine.
+**Who** Anyone holding a valid code. No token.
 
-### Rule 1 — seniority and scope
+### Request
 
-Derived from the caller's standing:
+Identify the same way as the request step, and send the code.
 
-| Caller | Reach |
+```json
+{
+  "email": "pastor.adeyemi@rccg.org",
+  "otp": "418205",
+  "newPassword": "Harvest2026!",
+  "confirmPassword": "Harvest2026!"
+}
+```
+
+| Field | Rule |
 |---|---|
-| **super-admin** | everyone, including sensitive offices |
-| **nat-support** (`ELEVATED_ROLES`) | unbounded by geography, but **bound by Rule 2** |
-| **region administrator** | people whose region code matches theirs, below their own level |
-| **province administrator** | people in their province, below their own level — explicitly not another province administrator |
+| `email` or `phone` | One of them, matching the request step |
+| `otp` | The six digits. Leading zeros are real — send `"048120"`, never `48120` |
+| `newPassword` | At least **8 characters** |
+| `confirmPassword` | Must equal `newPassword` |
 
-### Rule 2 — sensitive offices
+### Response — 200
 
-Some offices may never be reset by an administrator, however far inside that
-administrator's own unit the holder sits. **National support is bound by this
-too — that is the point of it.** Only super-admin passes.
+```json
+{
+  "success": true,
+  "message": "Password reset successful — 3 other session(s) signed out."
+}
+```
 
-It is not seniority. It is which offices can move money, change roles, or see
-everything.
+The count appears only when there were sessions to end.
 
-- A **hard floor in code** always protects `super-admin` and everything in
-  `ELEVATED_ROLES`. A database column cannot un-protect those.
-- Beyond that, `roles.sensitive` is a per-role boolean, set by
-  `scripts/flagSensitiveRoles.js` after human review — the proposed list is the
-  national-level roles and the continent/sub-continent/region accountants and
-  ICT.
-- The geographic administrators are **deliberately not** flagged: flagging them
-  would stop national support resetting the very administrators it exists to
-  help. `pic-parish` is excluded too — 51,551 holders.
-- Default is `false`, which fails **open**. Defaulting true would have made all
-  108 roles unresettable on the day it shipped.
+### Response — 400
 
-Review what is flagged with `GET /v1/roles/sensitivity-audit` (elevated or a
-scoped API key). It is read-only.
+```json
+{ "success": false, "message": "Invalid or expired OTP" }
+```
 
----
+| Message | Cause |
+|---|---|
+| `Passwords do not match` | The two password fields differ |
+| `New password must be at least 8 characters long` | Too short |
+| `Invalid or expired OTP` | Wrong code, expired code, or already used |
+| `Too many failed attempts. Try again after 22 minute(s).` | Five wrong codes; locked 30 minutes |
+| `User not found` | The identifier matches no account |
 
-## The open gap
+`Invalid or expired OTP` is deliberately one message for four different causes.
+Do not try to tell the user which one it was.
 
-> **`PATCH /v1/users/:id` accepts a `password` field, and any signed-in user can
-> call it against any account.**
+### What happens on success
 
-The route carries no role guard ([UsersRouter.ts:177](src/routes/UsersRouter.ts#L177)).
-The mount guard requires a bearer token and rejects API keys for non-GET
-requests — so it stops API keys, but not the ~55,000 people who can log in. The
-handler hashes whatever `password` arrives ([Users/index.ts:263-266](src/components/Users/index.ts#L263-L266))
-with:
+- The password is replaced.
+- Any outstanding "must change password" requirement is cleared.
+- **Every session on the account is signed out**, including any an attacker held.
+  The person must sign in again with the new password.
 
-- no minimum length — `POST /v1/users` has the same gap
-- no scope or standing check of any kind
-- no session revocation for the victim
-- no `passwordChangedAt` stamp, so forced-change policies do not see it
-- **no audit record that a password changed** — the activity line filters
-  `password` out of its "fields changed" list, so the log says the account was
-  updated without saying what
+### Use case
 
-`roles` on the same request *is* vetted. `password` is not.
-
-This is the surface the scoped administrator reset is meant to replace, and it
-should be closed when that lands — or before, by rejecting `password` on this
-route and directing callers to the proper endpoints. **Until then, treat "who may
-reset whom" as answered by "anyone with an account".**
+> The pastor types the code from their email and a new password. All their
+> devices are signed out and they sign in fresh.
 
 ---
 
-## Configuration
+## Change your own password
 
-| Variable | Default | Effect |
+```
+POST /auth/change-password
+```
+
+**Who** Any signed-in user, for their own account only.
+
+### Request
+
+```json
+{
+  "currentPassword": "OldHarvest2025",
+  "newPassword": "Harvest2026!",
+  "confirmPassword": "Harvest2026!"
+}
+```
+
+Bearer token in the `Authorization` header. The account is taken from the token,
+so there is no user id to send.
+
+### Response — 200
+
+```json
+{
+  "message": "Password changed successfully",
+  "otherSessionsRevoked": 2
+}
+```
+
+**The caller stays signed in.** Their other devices do not. That is the
+difference from a reset, where everything is signed out.
+
+### Response — 400
+
+| Message | Cause |
+|---|---|
+| `currentPassword, newPassword and confirmPassword are all required` | A field is missing |
+| `New passwords do not match` | The two differ |
+| `New password must be at least 8 characters long` | Too short |
+| `New password must be different from the current password` | They sent the same one |
+| `Current password is incorrect` | Verification failed |
+
+### Also live at a second address
+
+```
+POST /v1/users/{id}/change-password
+```
+
+The same operation, and `{id}` **must be your own user id**. Another id returns:
+
+```json
+{ "message": "You may only change your own password on this endpoint." }
+```
+
+Prefer `/auth/change-password`. It needs no id and cannot be called wrongly.
+
+### Use case
+
+> A finance officer wants a stronger password. They enter the old one and a new
+> one, stay signed in on the machine they are using, and their forgotten session
+> on a shared office computer is signed out.
+
+---
+
+## Force someone to change their password
+
+This does **not** set a password. It marks the account so the person must choose
+a new one at their next sign-in.
+
+```
+PATCH /v1/users/{id}/force-password-change
+```
+
+**Who** Super admin only.
+
+### Request
+
+```json
+{
+  "required": true,
+  "reason": "Shared credentials reported by the province office"
+}
+```
+
+| Field | Default | Meaning |
 |---|---|---|
-| `RESEND_API_KEY` | — | email delivery. **Absent means every email reset answers `success: false`.** |
-| `MANDRILL_FROM_NAME`, `MANDRILL_FROM_ADDRESS` | — | the From line on the OTP email |
-| `TERMII_API_ENDPOINT`, Termii key | — | SMS delivery |
-| `ELEVATED_ROLES` | `nat-support` | who is unbounded; also the hard floor of protected offices. `none` clears it |
-| `SECRET_PREVIOUS` | — | the retired signing key; a token verified against it triggers `SIGNING_KEY_ROTATED` |
+| `required` | `true` | `true` sets the requirement, `false` clears it |
+| `reason` | — | Optional, recorded in the audit log |
 
-The OTP numbers — 6 digits, 15 minutes, 5 attempts, 30-minute lockout — are
-constants in `src/utils/otpSecret.ts`, not environment variables. Changing them
-is a deploy.
+### Response — 200
+
+```json
+{
+  "message": "User must set a new password before continuing",
+  "userId": "64b7f0c2f1a2b3c4d5e6f701"
+}
+```
+
+### Use case
+
+> Two people are sharing one login. A super admin flags the account. The holder
+> is made to set a new password next time they sign in, and nobody has to learn
+> a temporary one over the phone.
 
 ---
+
+## Check whether you may reset someone
+
+Answers "am I allowed?" without doing anything. Always returns 200, whether the
+answer is yes or no, so asking is never treated as an attack.
+
+```
+GET /v1/password-resets/users/{id}/eligibility
+```
+
+**Who** Super admin, national support, continent, sub-continent, regional or
+province admin, or a parish pastor.
+
+### Response — 200, allowed
+
+```json
+{
+  "allowed": true,
+  "via": "province:PR0042",
+  "code": "",
+  "message": "",
+  "target": {
+    "id": "64b7f0c2f1a2b3c4d5e6f701",
+    "username": "grace.okonkwo",
+    "fullName": "Grace Okonkwo",
+    "email": "grace.okonkwo@rccg.org",
+    "parish": "PA015520",
+    "area": "AR0301",
+    "zone": "ZN0140",
+    "province": "PR0042",
+    "region": "R11",
+    "roles": ["rpms-member"],
+    "status": "1",
+    "userStatus": "ACTIVE"
+  }
+}
+```
+
+`via` names the unit the permission came through, and is the same string that
+goes into the audit log. A super admin gets `"super-admin"`, national support
+gets `"elevated:nat-support"`.
+
+### Response — 200, refused
+
+```json
+{
+  "allowed": false,
+  "via": "",
+  "code": "TARGET_OUTSIDE_UNIT",
+  "message": "This person is not inside any unit you administer.",
+  "target": {
+    "id": "64b7f0c2f1a2b3c4d5e6f702",
+    "username": "daniel.eze",
+    "fullName": "Daniel Eze"
+  }
+}
+```
+
+### Use case
+
+> A province admin opens a member's profile. The app calls this first and shows
+> or hides the "Reset password" button. No refusal is ever shown as an error.
+
+---
+
+## Reset someone's password
+
+```
+POST /v1/password-resets/users/{id}
+```
+
+**Who** The same list as eligibility. The full rules are in
+[Rules that decide every reset](#rules-that-decide-every-reset).
+
+### Request
+
+```json
+{
+  "reason": "Member called the province office, cannot access their email"
+}
+```
+
+| Field | Required | Rule |
+|---|---|---|
+| `reason` | **yes** | At least 5 characters. Recorded in the audit log |
+| `newPassword` | no | Omit it and the server generates one. If you send it, at least 8 characters |
+
+Omitting `newPassword` is the recommended path. A generated password is 16
+characters from an alphabet with no look-alikes, so nobody confuses a zero for
+an O while reading it out.
+
+### Response — 200
+
+```json
+{
+  "success": true,
+  "temporaryPassword": "Kpna-7Rtq4Vbx2Wm",
+  "mustChangePassword": true,
+  "sessionsRevoked": 2,
+  "via": "province:PR0042",
+  "target": {
+    "id": "64b7f0c2f1a2b3c4d5e6f701",
+    "username": "grace.okonkwo",
+    "fullName": "Grace Okonkwo"
+  }
+}
+```
+
+> **`temporaryPassword` is returned once and never again.** It is not stored in
+> readable form and never appears in the audit log. If it is lost, reset again.
+
+The person must change it at next sign-in, and every session they had is signed
+out.
+
+### Response — 403
+
+```json
+{
+  "success": false,
+  "code": "TARGET_ROLE_SENSITIVE",
+  "message": "This person holds a role that only a super administrator may reset."
+}
+```
+
+### Use case
+
+> A member in Province PR0042 has lost access to the email on their account, so
+> the code cannot reach them. The province admin resets it, reads the temporary
+> password to them on the phone, and the member is made to set their own at the
+> next sign-in. The audit log records who did it, to whom, and why.
+
+> A parish pastor does the same for a member of their own parish. A member of
+> the parish next door returns `TARGET_OUTSIDE_UNIT`.
+
+---
+
+## Find a reset request
+
+Lets support see the state of somebody's reset request. **It does not show the
+code.** That is the next endpoint.
+
+```
+GET /v1/password-resets/lookup?phone=08031234567
+GET /v1/password-resets/lookup?email=pastor.adeyemi@rccg.org
+GET /v1/password-resets/lookup?reference=PR-4K7MQ-2XB9T
+```
+
+**Who** Super admin and national support only. Deliberately not the
+administrators who may reset a password: resetting leaves a trail and ends every
+session, while reading out a live code is a larger power that stays with the
+national desk.
+
+Give one identifier. A reference wins if you send more than one, then phone,
+then email. Returns up to ten records, newest first. Phone numbers are folded
+before matching, so `08031234567`, `+2348031234567` and `2348031234567` all
+find the same person.
+
+### Response — 200
+
+```json
+{
+  "found": true,
+  "records": [
+    {
+      "reference": "PR-4K7MQ-2XB9T",
+      "requestedAt": "2026-09-17T09:14:02.000Z",
+      "channel": "email",
+      "maskedEmail": "pas•••••@rccg.org",
+      "maskedPhone": "0803•••4567",
+      "user": {
+        "fullName": "Grace Okonkwo",
+        "username": "08031234567",
+        "parish": "PA015520",
+        "province": "PR0042"
+      },
+      "status": "PENDING",
+      "otpExpiresAt": "2026-09-17T09:29:02.000Z",
+      "expired": false,
+      "attempts": 1,
+      "lockedUntil": null,
+      "disclosureCount": 0,
+      "disclosable": true
+    }
+  ]
+}
+```
+
+Never returned: the code, any hash of it, the encrypted form, the unmasked phone
+or email, the caller's IP address.
+
+| `status` | Meaning |
+|---|---|
+| `PENDING` | Issued, unused, still valid |
+| `VERIFIED` | Code accepted, password not yet set |
+| `COMPLETED` | Password was reset |
+| `EXPIRED` | The 15 minutes ran out |
+| `SUPERSEDED` | A newer request replaced it |
+| `LOCKED` | Five wrong attempts |
+
+### Response — 200, nothing found
+
+```json
+{ "found": false, "records": [] }
+```
+
+### Use case
+
+> Someone rings the national desk saying "I asked for a code twice and nothing
+> came". Support looks them up and sees two records, the first `SUPERSEDED` and
+> the second `PENDING`, sent by email to an address the member no longer uses.
+> Support now knows the real problem is the stale email address, not delivery.
+
+---
+
+## Read the code out to a caller
+
+The most sensitive endpoint in this document. Hands a live code to an operator so they can read it to the person on the phone.
+Two steps, deliberately.
+
+### Step one, prove it is really you
+
+```
+POST /v1/password-resets/step-up
+```
+
+```json
+{ "password": "<the operator's own password>" }
+```
+
+```json
+{
+  "stepUpToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "expiresIn": 300
+}
+```
+
+Valid for **five minutes**, usable **once**, and tied to the session that asked
+for it. It cannot be passed to a colleague, and it cannot be reused after a
+successful disclosure.
+
+Note this is the **operator's** own password, not the caller's.
+
+### Step two, disclose
+
+```
+POST /v1/password-resets/{reference}/disclose
+```
+
+Header `X-Step-Up-Token: <the token>`.
+
+```json
+{
+  "reason": "Caller verified by date of birth and parish; email undeliverable"
+}
+```
+
+### Response — 200
+
+```json
+{
+  "reference": "PR-4K7MQ-2XB9T",
+  "otp": "418205",
+  "otpExpiresAt": "2026-09-17T09:29:02.000Z",
+  "minutesRemaining": 11,
+  "disclosureCount": 1,
+  "disclosuresRemaining": 1
+}
+```
+
+### Refusals
+
+| Status | Code | Meaning |
+|---|---|---|
+| 401 | `STEP_UP_REQUIRED` | No token, expired, already used, or another session's |
+| 403 | `DISCLOSURE_LIMIT` | Twice for this request, or ten this hour for this operator |
+| 409 | `DISCLOSURE_UNAVAILABLE` | Encryption key missing; the code cannot be recovered |
+| 410 | `OTP_EXPIRED` | The code has expired. Ask the caller to request a new one |
+
+Every call is audited whether it succeeds or fails, with the operator, the
+reference, the reason and the time.
+
+### Use case
+
+> A pastor in a parish with no reliable email or network rings the national
+> desk. Support confirms who they are, looks up the request, re-enters their own
+> password, discloses the code and reads the six digits aloud. The pastor
+> completes the reset themselves and chooses their own password. Support never
+> learns it.
+
+---
+
+## Rules that decide every reset
+
+Applied in this order. The first one that fails is the answer.
+
+| # | Check | Code | Status |
+|---|---|---|---|
+| 1 | The target exists | `TARGET_NOT_FOUND` | 404 |
+| 2 | You are not the target | `SELF_RESET_NOT_PERMITTED` | 403 |
+| 3 | Every role they hold is a known role | `TARGET_ROLE_UNRESOLVED` | 409 |
+| 4 | They are not a super admin or national support | `TARGET_UNBOUNDED` | 403 |
+| 5 | **Super admin stops here — allowed** | — | 200 |
+| 6 | None of their roles is sensitive | `TARGET_ROLE_SENSITIVE` | 403 |
+| 7 | **National support stops here — allowed** | — | 200 |
+| 8 | You hold an administrative unit | `NO_RESET_STANDING` | 403 |
+| 9 | They are inside a unit you administer | `TARGET_OUTSIDE_UNIT` | 403 |
+| 10 | You outrank every role they hold | `TARGET_NOT_JUNIOR` | 403 |
+
+**Why super admin is checked at 5 and national support at 7.** Between them sits
+the sensitive check. That single position is what makes national support able to
+reset a regional admin but not the National Treasurer.
+
+### What "inside a unit you administer" means
+
+Every user record carries all seven hierarchy codes. You contain them if **any**
+level you administer matches their code at that same level.
+
+| Level | Rank | The code compared |
+|---|---|---|
+| Continent | 1 | `continent` |
+| Sub-continent | 2 | `subContinent` |
+| Region | 3 | `region` |
+| Province | 4 | `province` |
+| Zone | 5 | `zone` |
+| Area | 6 | `area` |
+| Parish | 7 | `parish` |
+
+A regional admin for R11 reaches everyone whose `region` is R11, however many
+provinces and parishes sit under it. A parish pastor reaches everyone whose
+`parish` matches theirs. **A blank code on either side never matches**, so a
+member with no parish recorded cannot be reset by any parish pastor.
+
+### What "you outrank them" means
+
+The target's most senior role decides. A province admin is rank 4, so they can
+reset ranks 5, 6 and 7, and cannot reset rank 4 or above. Equal rank is refused,
+which is why no one resets a peer.
+
+Roles with no geography — national, legal and similar — have no rank. They are
+protected by the sensitive flag instead.
+
+### Which roles are sensitive
+
+Held in the `sensitive` column on the roles collection, so it changes without a
+deploy. Currently proposed: every national role, accountants at region level and
+above, and the sub-continental ICT role. Super admin and national support are
+protected in code as well, so editing the database cannot expose them.
+
+Review the live list at `GET /v1/roles/sensitivity-audit`.
+
+---
+
+## All error codes
+
+| Code | Status | Endpoint | Meaning |
+|---|---|---|---|
+| `TARGET_NOT_FOUND` | 404 | reset, eligibility | No such user |
+| `SELF_RESET_NOT_PERMITTED` | 403 | reset | Use change-password instead |
+| `TARGET_ROLE_UNRESOLVED` | 409 | reset, eligibility | They hold a role not in the roles collection |
+| `TARGET_UNBOUNDED` | 403 | reset | They are a super admin or national support |
+| `TARGET_ROLE_SENSITIVE` | 403 | reset | Super admin only |
+| `NO_RESET_STANDING` | 403 | reset | You administer no unit |
+| `TARGET_OUTSIDE_UNIT` | 403 | reset | Not in your hierarchy |
+| `TARGET_NOT_JUNIOR` | 403 | reset | Same rank or more senior |
+| `REASON_REQUIRED` | 400 | reset, disclose | Missing or under 5 characters |
+| `WEAK_PASSWORD` | 400 | reset | Supplied password under 8 characters |
+| `STEP_UP_REQUIRED` | 401 | disclose | Step-up token missing or invalid |
+| `DISCLOSURE_LIMIT` | 403 | disclose | Per-request or per-operator cap reached |
+| `DISCLOSURE_UNAVAILABLE` | 409 | disclose | Encryption key absent |
+| `OTP_EXPIRED` | 410 | disclose | Code has expired |
+| `TARGET_DELETED` | 400 | reset | The account is deleted; restore it first |
+| `INVALID_REQUEST` | 400 | reset | The body is malformed in some other way |
+| `IDENTIFIER_REQUIRED` | 400 | lookup | No phone, email or reference given |
+| `REFERENCE_NOT_FOUND` | 404 | disclose | No request with that reference |
+| `PASSWORD_REQUIRED` | 400 | step-up | No password sent |
+
+---
+
+## Frontend guidance
+
+**Ask before you show.** Call eligibility and use it to show or hide the reset
+button. Never show the button and let the server refuse; a refusal after the
+click looks like a fault.
+
+**Show the temporary password once, and say so.** Put it on screen with a copy
+button and a line reading "This will not be shown again." There is no way to
+retrieve it.
+
+**Make `reason` a real field.** It appears in the audit log and is what makes
+the reset defensible later. A free-text box with a five-character minimum.
+
+**Treat these as the same failure.** Wrong code, expired code and already-used
+code all return `Invalid or expired OTP`. Show that message and offer to send a
+new code. Do not guess which it was.
+
+**Handle the delivery failure separately.** `We could not send your code right
+now` means nothing was sent. Do not say "check your inbox".
+
+**Send the OTP as a string.** `"048120"` is a valid code. Sending it as a number
+drops the leading zero and the reset fails.
+
+**A reset signs the person out everywhere. A change does not sign the caller
+out.** After a reset, send them to the sign-in screen. After a change, keep them
+where they are.
+
+**Nothing here changes how the existing endpoints behaved.** Request, reset and
+change-password keep their shapes; request-password-reset only gains a
+`reference` field alongside what it already returned.
+
+---
+
+## What this does not do
+
+Stated plainly, so nobody plans around a protection that is not there.
+
+**There is no rate limiting.** The reset endpoints are protected by the
+per-identifier lockout — five wrong codes, thirty minutes — and by the
+database-counted disclosure caps. Nothing limits how often a caller may ask for
+a code in the first place.
+
+**The check-username, check-email and check-phone endpoints still confirm
+whether an account exists.** Making the reset messages vague would not hide
+anything while those remain open.
+
+**An area or zone administrator cannot reset anyone.** If that turns out to be
+wrong for the way the organisation works, it is one entry in
+`PASSWORD_RESET_ROLES`, not a code change.
+
+**Disclosure is reversible encryption, by decision.** A compromised support
+account that also passes the step-up can read a live code. The compensating
+controls are the session binding, the required reason, the caps counted in the
+database and the audit row on every attempt.
