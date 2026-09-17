@@ -307,23 +307,3 @@ constants in `src/utils/otpSecret.ts`, not environment variables. Changing them
 is a deploy.
 
 ---
-
-## Known gaps
-
-- **No rate limiting anywhere in the application.** The reset endpoints are
-  defended solely by the per-identifier lockout. That lockout is a real control
-  because it is counted in the database; a per-process limiter would not be,
-  across several Fargate tasks.
-- **`trust proxy` is not set**, so `req.ip` is the load balancer. Anything keyed
-  on IP address collapses into one bucket. This matters the moment IP-keyed
-  limits are introduced, and not before.
-- **`users.phone` carries no index**, so the unauthenticated phone lookup on the
-  reset path scans ~55,000 documents. It belongs with the phone-normalisation
-  work — indexing the unnormalised values would only have to be rebuilt.
-- **A Termii failure throws** where an email failure is handled, so an SMS
-  outage surfaces as a `500` rather than the honest "could not send" message.
-- **`validatePasswordStrength()` exists and is called by nothing.** Every path
-  does its own length check, and two paths do none at all.
-- **`scripts/backfillUserStatus.ts` has never been run.** Unrelated to reset, but
-  it means an account deactivated under the old scheme — a lifecycle word left in
-  `status` rather than `"0"` — can still sign in.
