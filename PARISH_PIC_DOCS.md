@@ -32,6 +32,8 @@ than a gap in the data.
 - [When a pastor leaves](#when-a-pastor-leaves)
 - [Only the current pastor may act](#only-the-current-pastor-may-act)
 - [Principal officers — the role follows too](#principal-officers--the-role-follows-the-appointment-too)
+- [Change history](#change-history--the-four-records-read-together)
+- [Finding a person](#finding-a-person)
 - [All error codes](#all-error-codes)
 - [Frontend guidance](#frontend-guidance)
 - [What this does not do](#what-this-does-not-do)
@@ -465,6 +467,170 @@ findable, and fixed by appointing again.
 
 ---
 
+## Change history — the four records, read together
+
+```
+GET /v1/change-history
+```
+
+**Who** Any signed-in user. A caller bounded to a unit sees only their own; an
+unbounded one sees everything.
+
+History already existed in **four** collections with four shapes, four mounts and
+four guards. Answering "why is this parish in that province, and who agreed to
+it" meant knowing all four existed and reading them separately. This reads them
+and normalises them. **It writes nothing and owns nothing** — a fifth store would
+be one more thing to keep in step with the four that are already authoritative.
+
+| `source` | Comes from | Answers |
+|---|---|---|
+| `approval` | `approvalRequests` | who asked, who decided, why, and what was decided |
+| `hierarchy` | `hierarchyChangeJobs` | what a move, promotion, realign or rollback rewrote |
+| `principal-office` | `principalOfficeHolders` | who held which office, and when it ended |
+| `parish-pic` | `parishPicHolders` | who led which parish, and when it changed |
+
+### Filters
+
+`source` (comma separated), `type`, `status`, `userId`, `unitCode`, `limit`
+(max 200).
+
+### Response — 200
+
+```json
+{
+  "records": [
+    {
+      "source": "approval",
+      "referenceId": "64c1a0d3e2b4c5d6e7f80912",
+      "type": "USER_TRANSFER",
+      "status": "APPROVED",
+      "at": "2026-09-17T09:14:02.000Z",
+      "subject": { "userId": "…", "username": "moved.person", "name": "Moved Person" },
+      "unit": { "level": "parish", "code": "PA015520", "name": "…" },
+      "from": { "province": "PR0042", "parish": "PA009911" },
+      "to": { "province": "PR0099", "parish": "PA015520" },
+      "requestedBy": { "userId": "…", "username": "asker", "at": "…" },
+      "decidedBy": { "userId": "…", "username": "decider", "at": "…", "note": "Agreed" },
+      "reason": "Family relocation",
+      "detail": { "roleSlug": "", "levelType": "", "scopeCodes": ["PR0042", "PR0099"] }
+    }
+  ],
+  "sources": ["approval", "hierarchy", "principal-office", "parish-pic"],
+  "scope": "province PR0042",
+  "omittedOutsideYourUnit": 14
+}
+```
+
+A `hierarchy` entry adds `detail.rowsChanged`, `detail.reversible` and
+`detail.rolledBackBy`, so "what did that move actually rewrite, and can it still
+be undone" is answerable from the list.
+
+A hierarchy job has no approver of its own. When it was executed from an
+approval, `decidedBy.viaApprovalRequest` names it, so the two records join.
+
+### Scope fails closed
+
+> A record reaches a bounded caller **only when it can be positively matched to a
+> unit they administer**. Anything whose unit cannot be determined is omitted
+> rather than shown.
+
+Across four shapes the ways to be wrong outnumber the ways to be right, and being
+wrong means showing somebody another province's business. **A caller with no
+administrative unit sees nothing** — that is the correct answer, not an error.
+
+`omittedOutsideYourUnit` says how many were withheld, because a short list
+otherwise reads as "nothing happened".
+
+---
+
+## Finding a person
+
+```
+GET /v1/pastors/search?phone=08031234567
+GET /v1/pastors/search?name=gr%20ok
+GET /v1/pastors/search?email=grace.okonkwo@rccg.org
+GET /v1/pastors/search?username=grace.okonkwo
+GET /v1/pastors/search?parishCode=PA015520
+```
+
+**Who** Any signed-in user. Combine as many as you like; they narrow together.
+
+Each identifier is matched the way that identifier is actually stored, rather
+than by one generic regex over everything.
+
+| Field | Matching |
+|---|---|
+| `phone` | The same variant set the migrated lookup uses, matched **exactly** against both `phone` and `username` |
+| `email` | Exact, case-insensitive |
+| `username` | Exact, case-insensitive — **not** a prefix |
+| `name` | Anchored prefix, per word, across first, last and other names |
+| `parishCode` | Exact |
+
+**Phone finds the same person from any form.** `08031234567`,
+`+2348031234567`, `234 803 123 4567` and `(0803) 123-4567` all resolve to the
+same set. It searches `username` as well as `phone` because a great many
+accounts log in with their number.
+
+**Name is a prefix, per word, in any order.** `gr ok` finds Grace Okonkwo.
+`okonkwo grace` finds her too. **`deyemi` does not find Adeyemi** — the rule is
+"starts with", and it is worth telling users that plainly rather than leaving
+them to guess why a search came back empty.
+
+### Response — 200
+
+```json
+{
+  "totalCount": 1,
+  "records": [
+    {
+      "user": {
+        "id": "64b7f0c2f1a2b3c4d5e6f701",
+        "name": "Grace Okonkwo", "firstName": "Grace", "lastName": "Okonkwo",
+        "username": "grace.okonkwo", "email": "grace.okonkwo@rccg.org",
+        "phone": "08031234567", "designation": "Pastor",
+        "status": "1", "userStatus": "ACTIVE"
+      },
+      "hierarchy": { "parish": "PA015520", "province": "PR0042", "region": "R11" },
+      "roles": ["pic-parish"],
+      "pic": { "isPastorInCharge": true, "parishCode": "PA015520", "since": "…" }
+    }
+  ],
+  "pageNo": 0, "pageSize": 20
+}
+```
+
+**The `pic` block is the point.** It separates holding the role from sitting in
+the seat:
+
+```json
+"pic": {
+  "isPastorInCharge": false,
+  "holdsPicRole": true,
+  "theirParishIsLedBy": { "userId": "…", "username": "daniel.eze" }
+}
+```
+
+That reads: they hold `pic-parish`, they do **not** lead a parish, and the parish
+they belong to is led by someone else. With 51,551 holders of that role, this is
+usually the answer an administrator needs.
+
+### One person, in full
+
+```
+GET /v1/pastors/{userId}
+```
+
+Returns `user`, `hierarchy`, `roles`, `profile`, `pastorInChargeOf` and
+`principalOffices` as **separate blocks**. Separate on purpose: the same fact can
+disagree between `users` and `userProfiles`, and merging them would pick a winner
+silently.
+
+`migrated.included` is always `false` — the fifteen `jos_*` tables live behind
+`/v1/utility/migrated-profile/v3/{phone}` and pulling them into every profile
+read would make this the slowest call in the API.
+
+---
+
 ## What this does not do
 
 **Nothing is enforced yet.** `PIC_ENFORCEMENT` defaults to `off`, so holding
@@ -498,3 +664,41 @@ it is a decision rather than an oversight.
 **Ending a principal office does not remove the role.** The appointment closes;
 the entitlement stays. Same reasoning as the parish tier — removing roles from
 people is a migration with its own review.
+
+**Change history does not read the activity log.** `activityLogs` is the
+catch-all — every login, search and view — and folding it in would bury the four
+records that answer "who agreed to this" under traffic. Read it directly at
+`/v1/activityLogs` when you want that.
+
+**Change history pages by `limit`, not by page number.** It merges four sorted
+lists, so a stable offset across them would mean reading all four in full. Ask
+for what you need and filter.
+
+**Officer approvals are still super-admin and national support only.** A
+regional admin can raise one; only an unbounded caller decides it. Widening that
+to the administrator of the office's own scope is a privilege change and is not
+made here.
+
+**Name search is a prefix, and it is not a seek.** A case-insensitive regex takes
+no tight index bounds even when anchored — measured, both `/^ade/i` and `/ade/i`
+plan as an index scan over the whole index. The index keeps the scan off the
+documents, which over ~55,000 rows is worth having, but a true seek needs a
+normalised lowercase name column or a collation index. Neither is built.
+
+**No contains-anywhere name search.** Adding one is a line of code and would
+scan the collection on an endpoint any signed-in user can call. If it is needed,
+it should come with the normalised column above, not on its own.
+
+**`users` gained four indexes** — `phone`, `lastName`, `firstName`, `parish` —
+because the collection had none beyond the declared uniques. They build on boot
+where `autoIndex` is on.
+
+> **Verify the unique indexes on `users` in production.** On a local database
+> they are **absent**: `username` and `email` are declared with the
+> `mongoose-beautiful-unique-validation` string form (`unique: "message"`), and
+> creating an index from that fails — *"not convertible to bool"*. Mongoose
+> reports a failed build on an event nobody listens to, so it fails silently.
+> Locally that leaves `users` with no unique constraint on either field, enforced
+> only by the plugin on `save()` — which `updateOne` and raw collection writes
+> bypass. Production may differ if those indexes were ever created by hand.
+> `db.users.getIndexes()` settles it in one line.
