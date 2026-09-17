@@ -14,6 +14,10 @@ endpoint-by-endpoint references it leans on are listed at the end.
 - [Walkthrough 4 — repairing a split unit with realign](#walkthrough-4--repairing-a-split-unit-with-realign)
 - [National support](#national-support)
 - [The approval lifecycle](#the-approval-lifecycle)
+- [Confirming the size of a change](#confirming-the-size-of-a-change)
+- [Undoing a change](#undoing-a-change)
+- [Headquarters, and moving](#headquarters-and-moving)
+- [Who may realign what](#who-may-realign-what)
 - [Error codes, consolidated](#error-codes-consolidated)
 - [Frontend integration checklist](#frontend-integration-checklist)
 - [Operations](#operations)
@@ -337,6 +341,157 @@ primary role: elevation on the standing-based routes is judged on `users.roles`.
 
 ---
 
+## Confirming the size of a change
+
+A cascade is correct and can still be far larger than the person asking for it
+pictured. Realigning a **zone** rewrites every parish under it — and a zone that
+happens to be its province's only zone carries the whole province with it.
+Nothing in the request distinguishes that from a zone of six.
+
+So past **500 parish rows** an apply must state the number it expects to touch.
+
+```
+POST /v1/hierarchy-transfers/admin/realign
+{ "level": "zone", "unitCode": "Z123", "toLevel": "province", "toCode": "LA47",
+  "dryRun": true }
+```
+
+The dry run answers with, among the rest:
+
+```json
+{ "cascade": { "membersMatched": 4312 },
+  "applyWith": { "destinationVariant": 0,
+                 "expectedDestinationChain": { "...": "..." },
+                 "expectedMembers": 4312 } }
+```
+
+**Read `membersMatched` before you go on.** If it is not roughly the size of the
+unit you have in mind, stop — you are not moving what you think you are moving.
+Then apply with `applyWith` pasted in.
+
+Applying without it, above the threshold, is refused:
+
+| | |
+|---|---|
+| `CONFIRMATION_REQUIRED` | 409, with `detail.actualMembers` and `detail.resendWith`. Nothing was written and no job row was created. |
+| `MEMBER_COUNT_CHANGED` | 409. You said a number and it was wrong — either the dry run is stale or this is not the unit you meant. |
+
+Below 500 rows nothing changes; `expectedMembers` stays optional and is checked
+only if you send it. Set `HIERARCHY_CONFIRM_ABOVE_ROWS` to lower the threshold,
+or to `0` to require confirmation for every change regardless of size.
+
+**Approved transfers are exempt.** Two people have already agreed to that exact
+unit, and the approver executes a request raised days earlier with no body of
+their own to echo a count into.
+
+---
+
+## Undoing a change
+
+Every transfer, realign and promotion records the rows it is about to overwrite —
+grouped by the values they currently hold — before it writes. That is what makes
+an exact undo possible: a realign collapses several ancestries into one, and the
+job's `previousChain` says only that there *were* several, not which rows held
+which.
+
+```
+POST /v1/hierarchy-transfers/jobs/<jobId>/rollback   { "dryRun": true }
+```
+
+```json
+{ "dryRun": true, "operation": "REALIGN", "unitCode": "Z123",
+  "wouldRestore": 4312, "wouldSkip": 0 }
+```
+
+Then the same call without `dryRun`. Each group goes back to **its own** values,
+so a unit that was split is restored split rather than flattened.
+
+**Rows changed since are skipped, not dragged back.** A row is restored only
+while it still carries exactly what the original job wrote, so undoing change #1
+cannot silently undo change #2 riding on top of it. Those rows are counted in
+`skipped` and listed in `notes`. `{"force": true}` restores them regardless —
+use it only once you know what the later change was.
+
+Two things a rollback reports rather than doing:
+
+- **Principal offices vacated by a transfer are not reinstated.** Ending an
+  appointment is a decision about a person; reversing it by machine days later
+  would be a second such decision taken with nobody present. See
+  `cascade.officesVacated` on the original job.
+- **A code minted by a promotion stays allocated.** A released code that
+  reappears elsewhere is worse than one merely unused.
+
+`GET /jobs/<id>` shows one change in full, what was recorded against it, and
+`reversible`. A rollback is itself a `ROLLBACK` job, linked both ways through
+`rollbackOf` and `rollbackJobId`.
+
+**Changes made before this existed cannot be rolled back automatically** — they
+have no recorded before-state and are refused with `NO_SNAPSHOT` rather than
+guessed at. Their `previousChain` says what the unit looked like; repair with a
+fresh realign onto that parent.
+
+---
+
+## Headquarters, and moving
+
+A parish row can carry a headship flag — `phq` marks it as its **province's**
+headquarters, `zhq` its zone's, `ahq` its area's. The flag sits on the parish,
+and a move rewrites that parish's ancestors. So moving it into another province
+would leave the old province with **no** headquarters and the new one with
+**two**, without saying so.
+
+Moves now refuse that:
+
+```json
+{
+  "status": 409,
+  "code": "HQ_DEMOTION",
+  "message": "RCCG HOUSE OF PRAYER (parish 211343) is the headquarters of province LA47, and realigning area AR80 would move it into province LA99. LA47 would be left without a headquarters, and LA99 would have two. Choose a new headquarters for LA47 first, then move this one.",
+  "detail": {
+    "stranded": [ { "parishCode": "211343", "level": "province",
+                    "flag": "phq", "unitLosingItsHq": "LA47", "unitGainingIt": "LA99" } ],
+    "useInstead": [
+      { "useEndpoint": "/v1/hq-assignments/vacate",
+        "useBody": { "parishCode": "211343", "flags": ["phq"] }, "why": "…" },
+      { "useEndpoint": "/v1/hq-assignments/assign",
+        "useBody": { "level": "province", "unitCode": "LA47", "parishCode": "<the new one>" }, "why": "…" }
+    ]
+  }
+}
+```
+
+**It is judged per row, and only where the code actually changes.** An area
+moving between two zones of the *same* province keeps its province, so a `phq`
+holder inside it has lost nothing and is not flagged. The cascade still catches
+that case: a province headquarters also carries `zhq` and `ahq`, so the zone
+change trips on `zhq` instead.
+
+`preview` and every dry run report the same rows in `hqDemotions`, so a UI can
+refuse the button rather than let someone find out at apply time.
+
+A super-admin or national support may proceed anyway with
+`"acknowledgeDemotion": true`, which is recorded on the job. A scoped
+administrator cannot — for them it is two deliberate steps.
+
+---
+
+## Who may realign what
+
+| Caller | May realign | May not |
+|---|---|---|
+| `prov-admin` LA47 | a zone, area or parish that stays wholly inside LA47 | anything reaching into another province, at either end; a province, which is their own level |
+| `reg-admin` R36 | anything below region level inside R36 — **including across provinces**, which is their remit | anything touching another region |
+| super-admin, national support | anything, any level, across any boundary | — |
+
+Both ends are judged, and **every variant of both ends**: a split unit whose
+minority half lies in another province is refused, because ratifying it would
+quietly pull that half across the boundary.
+
+Being refused is not a dead end — `detail.useInstead` carries the same request
+addressed to the endpoint that can run it, ready to hand to whoever can.
+
+---
+
 ## Error codes, consolidated
 
 | Code | Status | Where | Meaning and what to do |
@@ -356,6 +511,15 @@ primary role: elevation on the standing-based routes is judged on `users.roles`.
 | `PROVINCE_UNRESOLVED` | 409 | approvals/unit-transfer | The unit or destination has no province on its rows. Repair first. |
 | `DESTINATION_CHAIN_CHANGED` | 409 | realign | The destination changed since your dry run. Re-run it and apply from its `applyWith`. |
 | `INCONSISTENT_UNIT` | 409 | **promote only** | Split source. Realign, then promote. No longer raised by transfer, move, preview or realign. |
+| `HQ_DEMOTION` | 409 | transfer, move, realign | The move would strand a headquarters. `detail.stranded`, `detail.useInstead`. Nothing written. |
+| `RESTRUCTURE_NEEDS_ADMIN` | 403 | scoped/promote, scoped/realign | Not an administrator role. Moving a unit does not need one — use `/transfer`. |
+| `INVALID_REQUEST` | 400 | all | The body failed validation. Previously thrown with no `code` at all. |
+| `CONFIRMATION_REQUIRED` | 409 | transfer, move, realign, promote | Above the row threshold with no `expectedMembers`. `detail.actualMembers`, `detail.resendWith`. Nothing written. |
+| `MEMBER_COUNT_CHANGED` | 409 | transfer, move, realign, promote | `expectedMembers` does not match reality. `detail.actualMembers`. |
+| `NO_SNAPSHOT` | 400 | rollback | No before-state recorded — the job predates snapshots, or was too large to record. `detail.previousChain`. |
+| `ALREADY_ROLLED_BACK` | 409 | rollback | Already undone; the message names the rollback job. |
+| `CANNOT_ROLL_BACK_A_ROLLBACK` | 400 | rollback | Roll back the job it undid, or re-apply the original. |
+| `JOB_NOT_FOUND` | 400 | jobs/:id, rollback | No such job. |
 | `STALE_REQUEST` | — | `executionResult.code` | A province changed between raise and approve. Raise afresh. |
 
 ---
@@ -397,6 +561,18 @@ primary role: elevation on the standing-based routes is judged on `users.roles`.
 - **Jobs:** every move, promotion and realign is a row in `hierarchyChangeJobs`
   with steps and counts; a unit-transfer approval's job carries
   `approvalRequestId`. `GET /jobs` is super-admin / national support.
+- **`detail` now reaches the client.** `sendHttpError` forwards it, so
+  `detail.requestBody`, `detail.useInstead`, `detail.resendWith` and
+  `detail.stranded` are readable. They were all being built and dropped before —
+  including by a message that told the caller to read `detail.requestBody`.
+  Messages are plain English for a person; the endpoints and bodies live in
+  `detail` for the UI.
+- **Snapshots:** `hierarchyChangeSnapshots` holds the before-state per job,
+  grouped by ancestry and chunked at 2,000 keys. There is deliberately **no TTL**
+  — expiring these silently removes the ability to undo, and the volume is small
+  (a cascade shares its ancestry, so a 3,000-parish zone is one group). Past
+  250,000 rows in one change the snapshot is abandoned and the job is marked
+  `snapshotComplete: false`; rollback then refuses rather than half-reversing.
 - **Backfill still pending:** `scripts/backfillUserStatus.ts` has not been run
   against a real database; until it is, existing users carry no `userStatus`,
   which reads as active. Dry-run first.
