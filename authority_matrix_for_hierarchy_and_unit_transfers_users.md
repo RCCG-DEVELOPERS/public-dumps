@@ -28,7 +28,7 @@ Current as of 18 September 2026. Everything on this page is live.
 | **Send** a parish, area or zone out to another province | The Province Admin of the province it is leaving, or an administrator above them | The Province Admin of the province it is **joining**; or the Regional Admin whose region holds that province; or Super Admin. Never the person who asked. |
 | Move anything, anywhere, including whole provinces | Super Admin / National Support | Nobody |
 | Move a unit's **headquarters parish** out from under it | Super Admin / National Support only. Everyone else must first name a different headquarters, then move the parish | Nobody |
-| Repair a unit whose members disagree about which province or region they are in | Super Admin / National Support anywhere; an Administrator within their own unit | Nobody |
+| Repair a unit whose parishes disagree about which province or region they are in — see [section 9](#9-realigning--repairing-a-unit-that-has-come-apart) | Super Admin / National Support anywhere; an Administrator when both sides of the disagreement are inside their own unit | Nobody |
 | Check in advance what a move would do and whether you are allowed | Anyone signed in | — |
 | Undo a completed move | Super Admin / National Support | Nobody |
 
@@ -96,6 +96,129 @@ role is not the same thing: many people hold the role who lead no parish.
 | Approve or reject | The people named in the tables above. Nobody approves their own request, except Super Admin. |
 | Withdraw | The person who raised it, or Super Admin |
 | See requests | Those in your own units; Super Admin sees all |
+
+---
+
+## 9. Realigning — repairing a unit that has come apart
+
+### What has gone wrong
+
+A province does not carry a record of which region it belongs to. Its parishes
+do, and so do its members. So a province is *split* when its own parishes
+disagree — half of them saying they are in one region, half saying another.
+
+This usually happens when a headquarters parish is moved away. A parish is the
+smallest unit, so moving it changes that parish and nothing else. If it happened
+to be the headquarters of a province, everything else in that province stays
+where it was, and the province is now claimed by two regions at once.
+
+You will notice it because the unit stops working. Any attempt to move,
+preview or promote it is refused, with a message saying the unit is
+inconsistent. Realigning is the only way to clear that.
+
+### What realigning does
+
+It puts every parish in the unit, and every member of it, under one parent —
+the one you choose. Nothing moves. The unit stays exactly where it is; you are
+correcting the record of a move that already happened.
+
+| It does | It does not |
+|---|---|
+| Update every parish in the unit to name the same parents | Move the unit anywhere |
+| Update every member of those parishes to match | Change the unit's own name or code |
+| Include departments, which an ordinary move leaves alone | End anyone's appointment as an officer |
+| Keep a record of every row it changed, so it can be undone | Decide for you. Where the parishes disagree, you pick which side is right |
+
+Officers are deliberately left alone. Moving a unit ends the appointments held
+at the unit it left, but realigning is a correction, not a move, and ending
+someone's appointment as a side effect of tidying data would be both destructive
+and a guess. Any appointments worth reviewing are listed for you, and you decide
+what to do with each.
+
+### Which unit goes under which
+
+You always name the level **immediately above** the unit. Everything higher is
+worked out from there.
+
+| Realign this | Under this | What usually caused it |
+|---|---|---|
+| A parish | its area | Duplicate records for the same parish that disagree |
+| An area | its zone | The area's parishes name two different zones or provinces |
+| A zone | its province | The zone's parishes name two different provinces |
+| A province | its region | The province headquarters was moved to another region and the rest of the province stayed behind. This is the common one |
+| A region | its sub-continent | A province moved between regions and left inconsistent spellings behind |
+| A sub-continent | its continent | Rare, and usually only a spelling difference |
+| A continent | — | Not possible. A continent has nothing above it |
+
+### Who can do it
+
+| Who | What they can repair |
+|---|---|
+| Super Admin / National Support | Any unit, anywhere, however far the split reaches |
+| An Administrator | A unit inside their own, **provided both sides of the split are also inside their own unit** |
+
+That second condition matters more than it looks. A split unit is, by
+definition, partly somewhere else. If that somewhere is outside your unit, then
+repairing it would mean pulling part of another administrator's territory into
+yours on your own say-so, which is exactly the decision that needs Super Admin.
+
+| Realign this | You need to be at least | Example |
+|---|---|---|
+| A parish | Area Admin | An Area Admin tidies duplicate records of a parish in their area |
+| An area | Zone Admin | A Province Admin repairs an area whose parishes name two zones **within their province** |
+| A zone | Province Admin | A Province Admin repairs a zone that drifted inside their province |
+| A province | Regional Admin | A Regional Admin repairs a province split between two of **their own** regions |
+| A region | Sub-Continent Admin | Rare, and normally Super Admin work |
+
+So a Province Admin whose province has drifted into **another** region cannot
+repair it themselves. They are told so, and told that Super Admin or National
+Support can.
+
+### When to use it
+
+- **A headquarters parish was moved out**, and the unit it used to head is now
+  claimed by two parents. This is what the feature was built for.
+- **A unit has stopped working** — moves, previews and promotions on it are all
+  being refused as inconsistent.
+- **Only the spelling differs.** Every record agrees on which unit it belongs
+  to, and differs only in how the name is written, such as `REGION 71` against
+  `Region 71`. Harmless, and cleared in one go.
+- **A large change stopped part-way through**, leaving some records updated and
+  others not.
+- **Older or imported records** where parishes were edited one at a time.
+
+Do **not** use it to move a unit somewhere new. If a unit genuinely belongs
+elsewhere, that is a transfer. If you try to realign a unit that is already
+consistent, you are told there is nothing to repair.
+
+### Doing it safely
+
+Always ask for a preview first. Which side of the disagreement wins **cannot be
+worked out again afterwards**, so it is worth reading before you commit.
+
+The preview tells you:
+
+- every version of the ancestry the unit's parishes currently claim, largest
+  group first, so you can see which is the majority
+- whether the destination is itself split, and which of its versions will be
+  used
+- how many parishes and how many people would be updated
+- any headquarters this would strand, which stops the operation unless Super
+  Admin explicitly accepts it
+- which officers hold appointments at a unit this one will no longer sit under,
+  so you can review them afterwards
+- a ready-made confirmation to send with the real request
+
+Send that confirmation back with the real request. It carries proof of what you
+were shown, so if the data changes in between, the operation stops rather than
+quietly writing a different answer from the one you approved.
+
+### Afterwards
+
+Two things are worth doing. Review any appointments that were flagged, and end
+or move them if they no longer make sense. Then check the unit again and confirm
+it no longer shows as split. If the repair was wrong, it can be undone — every
+record changed was kept.
 
 ---
 

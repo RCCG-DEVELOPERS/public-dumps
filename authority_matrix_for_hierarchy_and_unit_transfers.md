@@ -28,8 +28,8 @@ Describes the system in production as of 18 September 2026.
 | **Push** a unit out to another province | `POST /v1/approvals/unit-transfer` (raise) | `prov-admin` of the **source** province, anyone whose unit contains it, or unbounded | `prov-admin` of the **receiving** province; `reg-admin` whose region contains the destination; or unbounded. Never the raiser. `403 TRANSFER_NEEDS_APPROVAL` if attempted directly. |
 | Move any unit, any level, any distance | `POST /v1/hierarchy-transfers/admin/move` | Unbounded only | None |
 | A move that would **strand a headquarters** | `/transfer`, `/admin/move`, `/admin/realign` with `acknowledgeDemotion: true` | Unbounded only. Everyone else is refused and told to vacate the HQ first via `POST /v1/hq-assignments/vacate` | None |
-| Realign a split unit (repair) | `POST /v1/hierarchy-transfers/admin/realign` | Unbounded only | None |
-| Realign within own scope | `POST /v1/hierarchy-transfers/scoped/realign` | Administrator with standing over the unit **and** the destination | None |
+| Realign a split unit (repair) — see [section 9](#9-realign--the-repair-for-a-split-unit) | `POST /v1/hierarchy-transfers/admin/realign` | Unbounded only | None |
+| Realign within own scope — see [section 9](#9-realign--the-repair-for-a-split-unit) | `POST /v1/hierarchy-transfers/scoped/realign` | Administrator with standing over **both ends of every variant**, at a level above the unit | None |
 | Preview any of the above | `GET /v1/hierarchy-transfers/preview` | Any signed-in user; reports `permissionCode` and `permittedVia` for the caller | — |
 | Roll back a completed job | `POST /v1/hierarchy-transfers/jobs/:id/rollback` | Unbounded only | None |
 | List / inspect jobs | `GET /v1/hierarchy-transfers/jobs`, `/jobs/:id` | Unbounded only | — |
@@ -101,6 +101,164 @@ actually leads a parish. Holding the `pic-parish` role does not.
 | Approve / reject | `POST /v1/approvals/:id/approve`, `/reject` | Whoever the type's rule above names. Nobody decides their own request except a `super-admin`. |
 | Cancel | `POST /v1/approvals/:id/cancel` | The raiser, or unbounded |
 | View | `GET /v1/approvals`, `/:id` | Requests in the caller's units; unbounded sees all |
+
+---
+
+## 9. Realign — the repair for a split unit
+
+### What a split unit is
+
+A unit's ancestry is not stored on the unit. It is stored on every parish row
+that belongs to it, and on every user under it. A unit is therefore *split* when
+its own members disagree about who its parents are — half the parishes of
+province LA47 naming region R07, the other half naming R12.
+
+The usual cause is a headquarters parish being transferred away. A parish is a
+leaf, so moving it rewrites that one row and nothing else. If that parish
+happened to be the headquarters of a province, the province it headed is now
+named by two different regions, and nothing else was touched.
+
+A split is both the damage and the lock on the door. Once members disagree, the
+chain resolver refuses the unit outright, so every transfer, preview and
+promotion touching it returns `409 INCONSISTENT_UNIT`. Realign is the only
+operation that can look at a split unit, because it is the only one that exists
+to end the disagreement.
+
+### What a realign does
+
+It forces **every** member row and **every** user carrying the unit's code onto
+one ancestry: the chain of the parent you name. Parishes are written first,
+users second, and the job records what each step matched and modified.
+
+| It does | It does not |
+|---|---|
+| Rewrite the ancestor codes and names on every parish row of the unit | Move the unit anywhere. The unit stays exactly where it is |
+| Rewrite the same fields on every user under the unit | Change the unit's own code or name — refused as `IDENTITY_VIOLATION` |
+| Include **department** rows, which a transfer skips, or the unit stays split | End principal offices. A transfer vacates offices at units a moved unit has left; a realign leaves them standing and reports them as `officesAtRisk` |
+| Capture a per-row snapshot first, so the job can be rolled back | Guess. Where the members disagree, you choose which side wins |
+
+### Which level goes under which
+
+`toLevel` must be the **immediate** parent of `level`. Everything above it is
+inherited from that parent, never named directly.
+
+| Realign this | Under this | Typical trigger |
+|---|---|---|
+| `parish` | `area` | Duplicate rows for one parish code disagreeing with each other |
+| `area` | `zone` | The area's parishes name two different zones or provinces |
+| `zone` | `province` | The zone's parishes name two different provinces |
+| `province` | `region` | The province headquarters was moved to another region and the rest of the province stayed behind — the common case |
+| `region` | `sub-continent` | A province was moved between regions and left name drift behind |
+| `sub-continent` | `continent` | Rare; usually name drift only |
+| `continent` | — | Refused `NO_PARENT_LEVEL`. A continent has no parent |
+
+Naming the wrong level is refused as `DESTINATION_NOT_PARENT_LEVEL`, and the
+error carries `resendWith` holding the level you should have sent.
+
+### Who can realign what
+
+| Endpoint | Caller | Bound |
+|---|---|---|
+| `POST /v1/hierarchy-transfers/admin/realign` | Unbounded only | None. Any unit, any level, however far the split reaches |
+| `POST /v1/hierarchy-transfers/scoped/realign` | Administrator | Standing over **both ends of every variant**, at a level strictly above the unit |
+
+The scoped bound is stricter than it first looks. A split unit is by definition
+partly somewhere else, and **every** variant of the unit is judged against
+**every** variant of the destination. The variant lying outside your unit is
+exactly the one you must not be able to pull back in alone — that is the
+cross-boundary decision `/transfer` reserves. So:
+
+| Realign this | Scoped caller needs standing at | Example |
+|---|---|---|
+| `parish` | area or above | An area admin unifies duplicate rows of a parish in their area |
+| `area` | zone or above | A province admin repairs an area whose parishes name two zones **in their province** |
+| `zone` | province or above | A province admin repairs a zone that drifted within their province |
+| `province` | region or above | A region admin repairs a province split across two of **their own** regions |
+| `region` | sub-continent or above | Rare, and usually unbounded work |
+
+A province admin whose province has drifted into **another** region cannot
+repair it: one side is outside their unit, and they are refused `403
+TRANSFER_NOT_PERMITTED` with `/admin/realign` named as the route that can.
+
+### When to use it
+
+1. **After a headquarters parish is transferred away.** The unit it headed now
+   names two parents. This is the case the endpoint was built for.
+2. **When a transfer, preview or promotion returns `409 INCONSISTENT_UNIT`.**
+   The unit is split and nothing else will touch it until it is repaired.
+3. **Name drift only.** Every variant agrees on the codes and differs only in
+   the spelling of a name — `REGION 71` against `Region 71`. Harmless to a move,
+   which uses the dominant variant, and a single call to clear. The integrity
+   report counts these separately as `nameOnlyCount`.
+4. **After a cascade stopped part-way.** A failed job leaves some rows written
+   and others not; realign finishes the job onto one answer.
+5. **Legacy or imported data** where parishes were edited one at a time.
+
+Do **not** use it to move a unit. A realign corrects the record of a move that
+already happened. If the unit genuinely belongs somewhere else, use `/transfer`.
+When every variant already matches the destination, realign refuses with
+`ALREADY_ALIGNED` and points you at `/transfer` instead.
+
+### How to find split units
+
+`GET /v1/hierarchy-transfers/integrity` returns `splitUnits`, grouped by level.
+Each level carries the true `count`, the `nameOnlyCount`, and a capped list of
+`codes`. Every entry carries a ready-made `suggestedRealign` body, aimed at the
+parent that most of the unit's members already sit under, with `dryRun: true`
+already set.
+
+### The safe sequence
+
+Always dry run first. Which side of the split wins is **not recoverable from the
+data afterwards**.
+
+```
+1. POST /admin/realign  { level, unitCode, toLevel, toCode, dryRun: true }
+```
+
+Read from the response:
+
+| Field | What to check |
+|---|---|
+| `variants` | Every ancestry the unit's members currently claim, largest group first, with `matchesDestination` on each |
+| `destinationVariants` | The destination may itself be split. Index `0` is the dominant one and the default; pick another with `destinationVariant` |
+| `cascade` | How many parish rows and users would be written, and how many of those are departments |
+| `hqDemotions` | Headquarters that this would strand. Refused unless `acknowledgeDemotion` is sent, which is unbounded-only |
+| `officesAtRisk` | Principal officers held at a unit this one will no longer sit under. They are **left standing** — review each and end or transfer it through `/v1/principal-officers` if that is right |
+| `warnings` | Raised when the destination is split and you have not echoed a dry run |
+| `applyWith` | Paste this straight into the apply call |
+
+```
+2. POST /admin/realign  { ...same, dryRun: false, ...applyWith }
+```
+
+`applyWith` carries `destinationVariant`, `expectedDestinationChain` and
+`expectedMembers`. The chain echo makes the apply refuse with `409
+DESTINATION_CHAIN_CHANGED` if the data moved between the dry run and the apply,
+so you can never silently write a different answer from the one you approved.
+Above the confirmation threshold `expectedMembers` is required, not optional.
+
+### Error codes
+
+| Code | Meaning |
+|---|---|
+| `NO_PARENT_LEVEL` | A continent cannot be realigned |
+| `DESTINATION_NOT_PARENT_LEVEL` | `toLevel` is not the immediate parent; `resendWith` names the right one |
+| `EMPTY_UNIT` | No rows carry that unit code |
+| `ALREADY_ALIGNED` | Every variant already sits under the destination. Nothing to repair |
+| `IDENTITY_VIOLATION` | The patch would rewrite the unit's own code or name |
+| `DESTINATION_VARIANT_OUT_OF_RANGE` | `destinationVariant` is past the end of the list |
+| `DESTINATION_CHAIN_CHANGED` | The data changed between dry run and apply. Re-run the dry run |
+| `TRANSFER_NOT_PERMITTED` | Scoped caller; one side of the split, or of the destination, lies outside their unit |
+
+### Afterwards
+
+The job row records the collapse: `previousChain` holds a **list** of the
+variants that were merged, not a single chain, which is what distinguishes a
+realign row from a transfer row when reading the history back. A per-row
+snapshot is captured before any write, so `POST /jobs/:id/rollback` can put each
+variant back. Re-run the integrity report and confirm the unit no longer appears
+under `splitUnits`.
 
 ---
 
