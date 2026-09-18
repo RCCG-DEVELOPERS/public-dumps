@@ -4,8 +4,7 @@ Who may perform each operation, and who must approve it. This is the technical
 copy, with endpoints and error codes. The administrator's copy, without
 endpoints, is `authority_matrix_for_hierarchy_and_unit_transfers_users.md`.
 
-State of production as of 2026-09-18 (`main` at `3109104`, which includes
-everything through `023cbb8`).
+Describes the system in production as of 18 September 2026.
 
 ## Key
 
@@ -107,11 +106,11 @@ actually leads a parish. Holding the `pic-parish` role does not.
 
 ## Recent changes, all live
 
-| Commit | Change |
-|---|---|
-| `00f4efe` | A region administrator may approve a unit transfer between two provinces in their region |
-| `b566ab8` | The receiving province's administrator may pull a unit in through `/transfer` alone |
-| `023cbb8` | An administrator may appoint principal officers in the units they contain |
+- A region administrator may approve a unit transfer between two provinces in
+  their own region.
+- The receiving province's administrator may pull a unit in through `/transfer`
+  alone, without the giving province raising a request.
+- An administrator may appoint principal officers in the units they contain.
 
 ## Open question
 
