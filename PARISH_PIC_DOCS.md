@@ -32,9 +32,11 @@ than a gap in the data.
 - [When a pastor leaves](#when-a-pastor-leaves)
 - [Only the current pastor may act](#only-the-current-pastor-may-act)
 - [Principal officers — the role follows too](#principal-officers--the-role-follows-the-appointment-too)
+- [Who decides a cross-province unit transfer](#who-decides-a-cross-province-unit-transfer)
 - [Who decides an officer appointment](#who-decides-an-officer-appointment)
 - [Change history](#change-history--the-four-records-read-together)
 - [Finding a person](#finding-a-person)
+- [Roles nobody may borrow](#roles-nobody-may-borrow)
 - [All error codes](#all-error-codes)
 - [Frontend guidance](#frontend-guidance)
 - [What this does not do](#what-this-does-not-do)
@@ -386,6 +388,49 @@ accidentally enforcing.
 
 ---
 
+## Roles nobody may borrow
+
+**`super-admin` and everything in `ELEVATED_ROLES` (by default `nat-support`)
+can never be impersonated, and can never be switched into while impersonating.**
+
+Impersonation hands the caller a token carrying the target's roles. For an
+ordinary account that is the whole point — support sees what the user sees. For
+these roles it is a way to *become* one, and the token outlives the act by an
+hour, so a borrowed super-admin is indistinguishable from a granted one.
+
+Five surfaces, one rule:
+
+| Endpoint | Refused when |
+|---|---|
+| `POST /v1/users/impersonate` | the target account holds a protected role |
+| `POST /v1/users/support-impersonate` | the target account holds a protected role |
+| `POST /v1/users/impersonate-role` | the requested role is protected |
+| `POST /v1/users/support-impersonate-role` | the requested role is protected |
+| `POST /v1/users/switch-role` | the requested role is protected **and the session is impersonating** |
+
+```json
+{
+  "status": 403,
+  "code": "ROLE_NOT_IMPERSONABLE",
+  "message": "This account holds super-admin, which cannot be impersonated. A token carrying one of these roles IS that role, for as long as it lives — so borrowing one is indistinguishable from being granted it. Use an account that already holds the access you need."
+}
+```
+
+**`switch-role` is restricted only under impersonation.** A super-admin switching
+to their own super-admin role in their own session is ordinary, and entitlement
+has already been checked against the live database record. What is refused is
+reaching the same escalation in two steps: impersonate an account, then switch
+that session into a protected role.
+
+**The list comes from configuration.** It is `super-admin` plus `ELEVATED_ROLES`,
+so adding a role there protects it here too — there is no second list to keep in
+step.
+
+**Matching is exact.** `not-super-admin` is not protected, and a protected slug
+is never missed because of casing or padding.
+
+---
+
 ## All error codes
 
 | Code | Status | Endpoint | Meaning |
@@ -401,6 +446,7 @@ accidentally enforcing.
 | `ALREADY_PIC` | 409 | appoint | That person already leads this parish |
 | `APPOINTMENT_NOT_FOUND` | 400 | end | No active appointment with that id |
 | `INVALID_REQUEST` | 400 | appoint | The body failed validation |
+| `ROLE_NOT_IMPERSONABLE` | 403 | impersonate, support-impersonate, impersonate-role, support-impersonate-role, switch-role | super-admin and the elevated roles can never be borrowed |
 
 ---
 
@@ -468,27 +514,76 @@ findable, and fixed by appointing again.
 
 ---
 
+## Who decides a cross-province unit transfer
+
+A parish, area or zone moving into another province is two provinces' business,
+so it is an approval rather than a direct move.
+
+**The giving province asks.** `POST /v1/hierarchy-transfers/transfer` refuses it
+with `403 TRANSFER_NEEDS_APPROVAL` and hands back the body to send to
+`POST /v1/approvals/unit-transfer`. Only an administrator of the province the
+unit is **leaving** may raise it — `NO_STANDING_OVER_SOURCE` otherwise.
+
+**An administrator whose unit contains the receiving province agrees.**
+
+| Approver | May decide |
+|---|---|
+| Province admin of the **receiving** province | ✅ |
+| Province admin of the **giving** province | ❌ — they already spoke by asking |
+| Region admin whose region contains the receiving province | ✅ |
+| Region admin of another region | ❌ |
+| Sub-continent or continent admin containing it | ✅ |
+| Area or zone admin | ❌ — cannot contain a province |
+| Super admin, national support | ✅ |
+
+The region case is why this is worth stating: a move between two provinces
+**inside one region** is squarely that region administrator's to settle, and
+sending it to a super-admin bought nothing.
+
+Containment is judged on the destination's ancestry as snapshotted into
+`planSnapshot` when the request was raised, so it asks about the hierarchy the
+request was made against rather than the one standing now. A request raised
+before this carries no snapshot, and then only the receiving province admin
+qualifies — the behaviour it was raised under.
+
+> **This covers parish, area and zone.** A province or anything above it is not
+> an approval at all: it is `POST /v1/hierarchy-transfers/admin/move`,
+> super-admin and national support only. See
+> [What this does not do](#what-this-does-not-do).
+
+---
+
 ## Who decides an officer appointment
 
 Raising a principal-officer request and deciding it are different powers. Anyone
-with standing may raise one; deciding it happens **from above the office**.
+with standing may raise one; deciding it needs an administrator **whose unit
+contains the office**, at or above its level.
 
-| Approver | A province office in their region | A province office elsewhere | A region office |
-|---|---|---|---|
-| Super Admin | ✅ | ✅ | ✅ |
-| National Support | ✅ | ✅ | ✅ |
-| Region Admin (R07) | ✅ | ❌ | ❌ |
-| Province Admin (LA47) | ❌ *even their own* | ❌ | ❌ |
-| Area Admin | ❌ | ❌ | ❌ |
+| Approver | Province office in their province | Province office elsewhere | Region office in their region | Area office in their province |
+|---|---|---|---|---|
+| Super Admin | ✅ | ✅ | ✅ | ✅ |
+| National Support | ✅ | ✅ | ✅ | ✅ |
+| Region Admin (R07) | ✅ | ❌ | ✅ | ✅ |
+| Province Admin (LA47) | ✅ | ❌ | ❌ | ✅ |
+| Area Admin | ❌ | ❌ | ❌ | ✅ own area |
 
-**Two conditions, both required.** The approver must stand at a level *strictly
-senior* to the office, **and** their unit must contain it. Seniority alone would
-let a regional admin decide an appointment in another region; containment alone
-would let a province admin decide a province office — which is precisely the
-conflict of interest the approval step exists to prevent.
+**Two conditions, both required.** The approver's level must be at or above the
+office's, **and** their unit must contain it. Level alone would let a regional
+admin decide an appointment in another region; containment alone would let an
+area admin decide the province officer above them.
 
-This is why **a province admin cannot decide a province-level appointment even in
-their own province**. It is not an oversight in the scope check; it is the point.
+**A junior administrator can never decide a senior office.** That is the rule
+that remains.
+
+### What guards against approving your own side
+
+Same-level approval was a deliberate decision, taken knowing that an officer
+deciding a peer's appointment is the conflict an approval step usually exists to
+prevent. Two things still hold:
+
+- **Nobody but a super-admin may decide a request they raised themselves.** A
+  province admin can approve a colleague's appointment; never their own.
+- **Containment.** This is authority inside one's own unit, never over another.
 
 ### It is judged on a snapshot
 
@@ -506,12 +601,9 @@ up retroactively would change the terms after the fact.
 {
   "status": 403,
   "code": "NOT_AUTHORISED_TO_DECIDE",
-  "message": "An officer change is approved from above the office — an administrator of a level senior to it, whose unit contains it — or by a super-admin or national support. An administrator at the office's own level may not."
+  "message": "An officer change is approved by an administrator whose unit contains the office, at or above its level, or by a super-admin or national support. Nobody may approve a request they raised themselves."
 }
 ```
-
-Self-approval is still refused for everyone but a super-admin, senior standing or
-not.
 
 ---
 
@@ -713,6 +805,14 @@ it is a decision rather than an oversight.
 the entitlement stays. Same reasoning as the parish tier — removing roles from
 people is a migration with its own review.
 
+**Moving a province or a region is still not an approval.** `APPROVAL_TRANSFER_LEVELS`
+is `["parish", "area", "zone"]`; anything at province level or above goes through
+`POST /v1/hierarchy-transfers/admin/move`, which is super-admin and national
+support only. Making those requestable needs a decision this documentation
+cannot make for you: a province does not move into a province, it moves into a
+**region**, so "the receiving province approves" has no meaning there and some
+other administrator would have to inherit the role.
+
 **Change history does not read the activity log.** `activityLogs` is the
 catch-all — every login, search and view — and folding it in would bury the four
 records that answer "who agreed to this" under traffic. Read it directly at
@@ -722,10 +822,11 @@ records that answer "who agreed to this" under traffic. Read it directly at
 lists, so a stable offset across them would mean reading all four in full. Ask
 for what you need and filter.
 
-**An officer approval still cannot be decided at the office's own level.** See
-[Who decides an officer appointment](#who-decides-an-officer-appointment) — that
-is the conflict of interest the rule exists to prevent, and delegating upward did
-not change it.
+**An officer approval can be decided by a peer in the same unit.** A province
+admin may approve a province-level appointment in their own province. That was a
+deliberate choice; what stands against the obvious conflict is that nobody but a
+super-admin may decide a request they raised themselves. See
+[Who decides an officer appointment](#who-decides-an-officer-appointment).
 
 **Name search is a prefix, and it is not a seek.** A case-insensitive regex takes
 no tight index bounds even when anchored — measured, both `/^ade/i` and `/ade/i`
@@ -737,16 +838,36 @@ normalised lowercase name column or a collation index. Neither is built.
 scan the collection on an endpoint any signed-in user can call. If it is needed,
 it should come with the normalised column above, not on its own.
 
-**`users` gained four indexes** — `phone`, `lastName`, `firstName`, `parish` —
-because the collection had none beyond the declared uniques. They build on boot
-where `autoIndex` is on.
+**The pastor search needs three indexes on `users`, and they are NOT created by
+deploying.** Run:
 
-> **Verify the unique indexes on `users` in production.** On a local database
-> they are **absent**: `username` and `email` are declared with the
-> `mongoose-beautiful-unique-validation` string form (`unique: "message"`), and
-> creating an index from that fails — *"not convertible to bool"*. Mongoose
-> reports a failed build on an event nobody listens to, so it fails silently.
-> Locally that leaves `users` with no unique constraint on either field, enforced
-> only by the plugin on `save()` — which `updateOne` and raw collection writes
-> bypass. Production may differ if those indexes were ever created by hand.
-> `db.users.getIndexes()` settles it in one line.
+```
+npx ts-node scripts/createUserSearchIndexes.ts --dry-run
+npx ts-node scripts/createUserSearchIndexes.ts
+```
+
+It creates `user_by_phone`, `user_by_last_name` and `user_by_first_name`, skips
+anything already indexed over the same key, and is safe to re-run.
+
+> **Why a script and not a schema declaration.** A declared index on `users`
+> never builds. The field-level uniques use the
+> `mongoose-beautiful-unique-validation` string form — `unique: "Two users
+> cannot share…"` — and creating an index from that is refused as *"not
+> convertible to bool"*. Mongoose stops at the first failing index and reports it
+> on an event nobody listens to, so **every** index declared in that schema is
+> silently never created. Verified: after `init()` on a collection holding only
+> `_id_`, nothing else appears.
+>
+> That is why production's indexes carry hand-made names — `uniq_username`,
+> `uniq_email`, `user_by_parish`, `user_by_area` — rather than mongoose's
+> `field_1` form. They were made out of band because that is the only way they
+> can be.
+>
+> It also means the names matter: a second index over the same key under a
+> different name is refused with `IndexOptionsConflict` (code 85). `parish` and
+> `area` are deliberately not in the script, because production already has them.
+
+**Uniqueness on `users.username` and `users.email` IS enforced in production** —
+`uniq_username` and `uniq_email` exist, created by hand. An earlier draft of this
+document said otherwise on the strength of a local database, where they are
+absent. Local and production differ here; production is correct.
