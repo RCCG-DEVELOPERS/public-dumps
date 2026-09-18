@@ -4,8 +4,8 @@ Who may perform each operation, and who must approve it. This is the technical
 copy, with endpoints and error codes. The administrator's copy, without
 endpoints, is `authority_matrix_for_hierarchy_and_unit_transfers_users.md`.
 
-State of the `dev` branch at `023cbb8` (2026-09-18). Rows marked **dev only**
-are not yet in production; production runs `main`.
+State of production as of 2026-09-18 (`main` at `3109104`, which includes
+everything through `023cbb8`).
 
 ## Key
 
@@ -24,9 +24,9 @@ are not yet in production; production runs `main`.
 | Action | Endpoint | Who can do it | Approver needed |
 |---|---|---|---|
 | Move a unit **within** their own unit | `POST /v1/hierarchy-transfers/transfer` | Anyone with standing over a unit containing **both** ends — `picp`, `prov-admin`, `reg-admin` … — or unbounded | None |
-| **Pull** a unit in from another province | `POST /v1/hierarchy-transfers/transfer` | **Administrator** of the receiving unit — `prov-admin` of the destination province, `reg-admin` of a region containing it — or unbounded. **dev only** (`b566ab8`) | None. The receiving administrator's action *is* the approval. A pending `UNIT_TRANSFER` aimed at their province is settled `APPROVED` by it; one aimed elsewhere refuses `409 REQUEST_PENDING_ELSEWHERE`. |
+| **Pull** a unit in from another province | `POST /v1/hierarchy-transfers/transfer` | **Administrator** of the receiving unit — `prov-admin` of the destination province, `reg-admin` of a region containing it — or unbounded | None. The receiving administrator's action *is* the approval. A pending `UNIT_TRANSFER` aimed at their province is settled `APPROVED` by it; one aimed elsewhere refuses `409 REQUEST_PENDING_ELSEWHERE`. |
 | Same pull, by a non-administrator (`picp`, `prov-asst-admin`) | `POST /v1/hierarchy-transfers/transfer` | Refused `403 TRANSFER_NOT_PERMITTED`; the message names the administrator who can | — |
-| **Push** a unit out to another province | `POST /v1/approvals/unit-transfer` (raise) | `prov-admin` of the **source** province, anyone whose unit contains it, or unbounded | `prov-admin` of the **receiving** province; `reg-admin` whose region contains the destination (**dev only**, `00f4efe`); or unbounded. Never the raiser. `403 TRANSFER_NEEDS_APPROVAL` if attempted directly. |
+| **Push** a unit out to another province | `POST /v1/approvals/unit-transfer` (raise) | `prov-admin` of the **source** province, anyone whose unit contains it, or unbounded | `prov-admin` of the **receiving** province; `reg-admin` whose region contains the destination; or unbounded. Never the raiser. `403 TRANSFER_NEEDS_APPROVAL` if attempted directly. |
 | Move any unit, any level, any distance | `POST /v1/hierarchy-transfers/admin/move` | Unbounded only | None |
 | A move that would **strand a headquarters** | `/transfer`, `/admin/move`, `/admin/realign` with `acknowledgeDemotion: true` | Unbounded only. Everyone else is refused and told to vacate the HQ first via `POST /v1/hq-assignments/vacate` | None |
 | Realign a split unit (repair) | `POST /v1/hierarchy-transfers/admin/realign` | Unbounded only | None |
@@ -49,7 +49,7 @@ are not yet in production; production runs `main`.
 | Action | Endpoint | Who can do it | Approver needed |
 |---|---|---|---|
 | Appoint an officer at their **own** unit (`prov-admin` appoints `picp` of LA47) | `POST /v1/principal-officers` | Any officer with standing at that exact unit, or unbounded | None |
-| Appoint an officer in a unit they **contain** (area-admin appoints `pic-parish` in AR1; `prov-admin` anywhere in LA47) | `POST /v1/principal-officers` | Administrator of the containing unit, or unbounded. **dev only** (`023cbb8`) | None |
+| Appoint an officer in a unit they **contain** (area-admin appoints `pic-parish` in AR1; `prov-admin` anywhere in LA47) | `POST /v1/principal-officers` | Administrator of the containing unit, or unbounded | None |
 | Appoint upward (area-admin appoints a province officer) | `POST /v1/principal-officers` | Refused `403 NO_STANDING_AT_UNIT` | Raise `officer-promotion` instead |
 | Appoint into a unit that is not the user's own | `POST /v1/principal-officers` with `scopeCode` | Same as above, **and** the target user must hold an active secondary grant of that role there | None |
 | Appoint a non-administrative office (`training-manager`) | `POST /v1/principal-officers` | Same rules; the holder gains **no** administrative authority | None |
@@ -105,16 +105,13 @@ actually leads a parish. Holding the `pic-parish` role does not.
 
 ---
 
-## Not yet in production
+## Recent changes, all live
 
 | Commit | Change |
 |---|---|
 | `00f4efe` | A region administrator may approve a unit transfer between two provinces in their region |
 | `b566ab8` | The receiving province's administrator may pull a unit in through `/transfer` alone |
 | `023cbb8` | An administrator may appoint principal officers in the units they contain |
-
-Production still requires the two-sided raise-and-approve flow for every
-cross-province move, and exact-level standing for principal-officer appointments.
 
 ## Open question
 
