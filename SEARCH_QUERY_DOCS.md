@@ -12,9 +12,8 @@ Nothing that exists has changed. `/v1/users/search`,
 `columnLogic` they already accept. **No frontend change is required by this
 release.** The eight endpoints below are additions.
 
-They exist because of a real outage. On 18 September the production primary
-spent ten minutes at 99.7% CPU with zero read tickets free, and the API returned
-about 2,970 timeouts. Two filters from that morning's slow-query log:
+The production primary spent ten minutes at 99.7% CPU with zero read tickets free, and the API returned
+about 2,970 timeouts. Two filters from the slow-query log:
 
 ```js
 { parishCode: { $regex: "975462", $options: "i" } }   // 52,721 index keys → 1 row
