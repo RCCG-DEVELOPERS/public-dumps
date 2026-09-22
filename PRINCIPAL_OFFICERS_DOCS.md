@@ -1,5 +1,11 @@
 # Principal Officers — API Reference
 
+> **National support acts with super-admin authority here.** Wherever this
+> document says "super-admin" as an actor or approver, read "super-admin or
+> national support" (`nat-support`, via `ELEVATED_ROLES`). The bound is stated in
+> `CONFIGURATION.md` → *Who acts with super-admin authority over the hierarchy*;
+> such actions are logged as `elevated:nat-support`, never `super-admin`.
+
 Companion to `ROLES_API_DOCS.md` and `DEPARTMENT_API_DOCS.md`.
 For rollout status and phase tracking, see `PRINCIPAL_OFFICERS.md`.
 
@@ -33,13 +39,13 @@ same as being the officer — the register (`principalOfficeHolders`) decides th
 | **Vacant** | The office exists but nobody is appointed |
 | **Unit** | The code at the role's `level_type` — province `LA47`, region `R07` |
 
-**24 roles are offices**, province level and above. Which roles are offices is
+**26 roles are offices**, province level and above. Which roles are offices is
 `roles.principalOffice`, a boolean — data, not a list in code.
 
 | Level | Roles |
 |---|---|
-| province | `picp`, `prov-admin`, `prov-accountant`, `prov-asst-admin`, `prov-asst-accountant`, `apicp-admin`, `apicp-csr` |
-| region | `picr`, `apicr`, `reg-admin`, `reg-accountant`, `reg-asst-admin`, `reg-asst-accountant`, `cgo` |
+| province | `picp`, `prov-admin`, `prov-accountant`, `prov-asst-admin`, `prov-asst-accountant`, `apicp-admin`, `apicp-csr`, `apicp-csr-2` |
+| region | `picr`, `apicr`, `apicr-csr`, `reg-admin`, `reg-accountant`, `reg-asst-admin`, `reg-asst-accountant`, `cgo` |
 | sub-continent | `sco`, `asco`, `sub-cont-admin`, `sub-cont-accountant`, `sub-cont-ict`, `training-manager` |
 | continent | `co`, `aco`, `cont-admin`, `cont-accountant` |
 
@@ -281,7 +287,7 @@ Content-Type: application/json
 | Field | Required | Notes |
 |---|---|---|
 | `userId` | yes | Mongo object id |
-| `roleSlug` | yes | must be flagged `principalOffice` |
+| `roleSlug` | yes | must be flagged `principalOffice`. One holder per slug per unit — `apicp-csr` and `apicp-csr-2` are two distinct offices, so a province may fill both |
 | `scopeCode` | no | **defaults to the user's own unit at the role's level** |
 | `appointmentType` | no | `substantive` (default) or `acting` |
 | `note` | no | max 500 |
@@ -292,13 +298,28 @@ Content-Type: application/json
 > holds an active **secondary grant** of that role there — otherwise an admin
 > could appoint anyone to any province, which is the escalation this prevents.
 
+**Who may appoint.** The caller must hold standing over the office's unit in one
+of two ways, judged on the unit as resolved from the database:
+
+| Caller | May appoint |
+|---|---|
+| super-admin, national support | anywhere |
+| an officer at the **same unit** (prov-admin of LA47) | any office of LA47, including one that outranks them (the `picp`) |
+| an administrator of a unit that **contains** the office (area-admin of AR1, prov-admin of LA47, reg-admin of R07) | any office at a level **below** theirs inside their unit — the `pic-parish` pastor of a parish in their area / province / region |
+| anyone else (another area's admin, an assistant, a `picp` for a parish outside their province) | refused `403 NO_STANDING_AT_UNIT` |
+
+Containment never reaches upward: an area-admin cannot appoint the province
+officers above them. The same rule decides who may approve an officer-transfer
+or officer-promotion request, so appointing directly and approving an
+appointment answer to one test.
+
 Returns `201` with the appointment. Errors:
 
 | Status | When |
 |---|---|
 | `400` | unknown user or role; role not flagged as an office; user deactivated; user has no code at that level; user has no standing in the requested unit |
 | `409` | the office already has an active holder — `code: OFFICE_ALREADY_HELD` |
-| `403` | caller is not super-admin |
+| `403` | caller has no standing over the office's unit — `code: NO_STANDING_AT_UNIT` |
 
 ---
 
