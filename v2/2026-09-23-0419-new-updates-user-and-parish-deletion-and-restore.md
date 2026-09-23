@@ -217,7 +217,78 @@ alone.
 - **No scoping on the new routes yet.** `GET /deleted` and `/restore` are
   elevated-only, not bounded by the caller's own province. That is deliberate for
   now — narrow it when the approval flow lands.
-- **Parish disable-by-approval is not built.** The agreed direction is that
-  ordinary administrators stop deleting parishes altogether and instead *request*
-  a disable with reasons, approved by super-admin, auto-reactivating after six
-  months. The machinery here — mark, restore, list — is what that will sit on.
+- ~~Parish disable-by-approval is not built.~~ **Built on 2026-09-23** — see
+  [the disable flow](2026-09-23-0505-new-updates-parish-disable-approval-scoped-status-and-reports.md).
+  Ordinary administrators no longer delete parishes directly; they request a
+  disable with a reason, a super-admin decides, and it expires after six months.
+  The machinery here — mark, restore, list — is what it sits on.
+
+---
+
+## Update — readable metadata on deleted records *(2026-09-23 08:21)*
+
+A page of deletions was not something a person could scan. The tombstone stores
+the whole snapshot, so the information was always there — but a caller had to
+reach into a large nested object per row to answer "which parish was that?",
+and `recordLabel` on its own is only a code.
+
+### `GET /v1/deletions` — every row now carries a `summary`
+
+Flat, shaped for its module, **derived not stored** — the snapshot stays the
+single source, so this cannot drift from it, and the snapshot is still returned
+in full beside it.
+
+Parish rows:
+
+```json
+{
+  "recordLabel": "211003",
+  "deletedByUsername": "tunde.support",
+  "summary": {
+    "parishCode": "211003",
+    "parishName": "RCCG EXAMPLE PARISH",
+    "parishType": "PARISH",
+    "areaCode": "A31",   "areaName": "AREA 31",
+    "zoneCode": "Z12",   "zoneName": "ZONE 12",
+    "provinceCode": "LA47", "provinceName": "LAGOS PROVINCE 47",
+    "regionCode": "R07", "regionName": "REGION 7",
+    "subContinentCode": "SC01", "subContinentName": "…",
+    "continentCode": "AF", "continentName": "AFRICA",
+    "country": "NG", "status": "1"
+  },
+  "snapshot": { "…": "still here, in full" }
+}
+```
+
+Codes **and** names, at every level — a code on its own tells a reader nothing.
+
+User rows:
+
+```json
+{
+  "summary": {
+    "username": "jadesola.o",
+    "name": "Jadesola Okonkwo",
+    "email": "jadesola@example.test",
+    "phone": "08031234567",
+    "parish": "211003",
+    "province": "LA47",
+    "region": "R07",
+    "roles": "[\"pic-parish\"]",
+    "userStatus": "DELETED"
+  }
+}
+```
+
+`name` is **assembled** from `firstName` and `lastName`, falling back to a stored
+`name` when the record has one instead. A list of usernames alone is not
+something a person can scan.
+
+`summary` is `null` when the tombstone carries no snapshot, rather than an empty
+shell that reads as "this record had no name".
+
+### `GET /v1/users/deleted` also gains `name`
+
+Same reasoning, same assembly. The parish listing needed nothing — it returns
+full directory documents, which already carry `parishCode`, `parishName` and the
+hierarchy.

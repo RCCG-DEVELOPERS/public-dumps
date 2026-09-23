@@ -36,6 +36,7 @@ Each file carries, in this order:
 
 | Date | File | Covers |
 |---|---|---|
+| 2026-09-23 | [directory-search](2026-09-23-1435-new-updates-directory-search.md) | One search across people and parishes by name, hierarchy code, phone or email, with wildcards; deleted rows searchable |
 | 2026-09-23 | [privileged-audit-archive](2026-09-23-0550-new-updates-privileged-audit-archive.md) | Aged-out audit records move to a searchable archive; retention 400 → 1000 days |
 | 2026-09-23 | [snapshot-restore-nat-support-erase-and-docs-move](2026-09-23-0540-new-updates-snapshot-restore-nat-support-erase-and-docs-move.md) | Restore from a deletion snapshot; nat-support may erase a user; docs moved to v1/; env vars documented |
 | 2026-09-23 | [parish-disable-approval-scoped-status-and-reports](2026-09-23-0505-new-updates-parish-disable-approval-scoped-status-and-reports.md) | Disabling a parish becomes a super-admin approval with six-month expiry; scoped user status; who-deleted report; sweep export |
@@ -48,6 +49,7 @@ Each file carries, in this order:
 
 | File | Covers |
 |---|---|
+| [DELETIONS_DOCS](DELETIONS_DOCS.md) | Soft delete, restore, permanent erasure, the deletion record, who-deleted-what, and snapshot restore |
 | [reference-transfer-jobs-approvals-and-rollback](reference-transfer-jobs-approvals-and-rollback.md) | How a hierarchy change is recorded, approved and undone; batching many moves; what cannot be undone |
 
 ## The longer references
