@@ -171,7 +171,7 @@ To move many units:
 `GET /jobs?from=&to=` gives you the list to work backwards through.
 
 The one genuinely batched operation is the **user hierarchy sweep**
-([HIERARCHY_SYNC_DOCS.md](../HIERARCHY_SYNC_DOCS.md)), which repairs users rather
+([HIERARCHY_SYNC_DOCS.md](v1/HIERARCHY_SYNC_DOCS.md)), which repairs users rather
 than moving units — and it has its own circuit breakers precisely because it is
 the one thing here that touches thousands of records at once.
 

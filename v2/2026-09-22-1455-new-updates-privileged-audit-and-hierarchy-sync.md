@@ -2,8 +2,8 @@
 
 **Commits:** `e8325fc`, `7b5e11d`, `be69727`, `80c0485` · **Branch:** `dev`
 
-Full references: [PRIVILEGED_AUDIT_DOCS.md](../PRIVILEGED_AUDIT_DOCS.md) and
-[HIERARCHY_SYNC_DOCS.md](../HIERARCHY_SYNC_DOCS.md). This is the summary.
+Full references: [PRIVILEGED_AUDIT_DOCS.md](v1/PRIVILEGED_AUDIT_DOCS.md) and
+[HIERARCHY_SYNC_DOCS.md](v1/HIERARCHY_SYNC_DOCS.md). This is the summary.
 
 ---
 
@@ -80,6 +80,10 @@ Read as: **tunde.support**, acting as **jadesola.o**, changed her phone number.
 unrecognised value falls back to `impersonation`, never the expensive one.
 
 **Run `scripts/createPrivilegedAuditIndexes.ts` before this takes traffic.**
+
+> Retention later moved from 400 days to **1000**, and aged-out rows now go to a
+> searchable archive rather than simply expiring — see the note of
+> [2026-09-23 05:50](2026-09-23-0550-new-updates-privileged-audit-archive.md).
 
 ---
 
@@ -183,7 +187,12 @@ however the flag is set. It fails silently, with no error.
   collection growth for a week first.
 - The sweep has never applied against production. Report first, read the orphan
   count, then flip.
-- `parishDirectory` indexes `parishCode` as `parish_code_unique` while the schema
-  declares it mongoose's way. With `MONGO_AUTO_INDEX` on that is an
-  `IndexOptionsConflict` (code 85) reported on a connection event nothing
-  listens to — a silent error on every boot. Pre-existing; worth a look.
+- **`parishDirectory`'s schema-declared index never builds.** Reproduced
+  locally: the schema says `unique: "Duplicate Parish Code ({VALUE})"` — a
+  STRING where MongoDB wants a boolean — so `ensureIndexes` is rejected with
+  `TypeMismatch` (code 14), not the `IndexOptionsConflict` first suspected. With
+  `MONGO_AUTO_INDEX` defaulting to true and nothing listening on the index
+  event, this fails silently on every boot. It is why the live index had to be
+  created by hand as `parish_code_unique`, and it is the same class of fault
+  `Users/model.ts:500-519` documents. Pre-existing, and the fix is the plugin's
+  string form, not the index.

@@ -36,6 +36,9 @@ Each file carries, in this order:
 
 | Date | File | Covers |
 |---|---|---|
+| 2026-09-23 | [privileged-audit-archive](2026-09-23-0550-new-updates-privileged-audit-archive.md) | Aged-out audit records move to a searchable archive; retention 400 → 1000 days |
+| 2026-09-23 | [snapshot-restore-nat-support-erase-and-docs-move](2026-09-23-0540-new-updates-snapshot-restore-nat-support-erase-and-docs-move.md) | Restore from a deletion snapshot; nat-support may erase a user; docs moved to v1/; env vars documented |
+| 2026-09-23 | [parish-disable-approval-scoped-status-and-reports](2026-09-23-0505-new-updates-parish-disable-approval-scoped-status-and-reports.md) | Disabling a parish becomes a super-admin approval with six-month expiry; scoped user status; who-deleted report; sweep export |
 | 2026-09-23 | [user-and-parish-deletion-and-restore](2026-09-23-0419-new-updates-user-and-parish-deletion-and-restore.md) | Soft delete, restore and permanent delete for users and parishes; nat-support may rename |
 | 2026-09-22 | [privileged-audit-and-hierarchy-sync](2026-09-22-1455-new-updates-privileged-audit-and-hierarchy-sync.md) | The privileged audit trail, the user-hierarchy sweep, two new principal offices |
 | 2026-09-20 | [impersonation-sessions-and-deletion-records](2026-09-20-0414-new-updates-impersonation-sessions-and-deletion-records.md) | Borrowed sessions survive refresh, sensitive roles stripped not refused, the deletion record becomes readable |
@@ -49,10 +52,11 @@ Each file carries, in this order:
 
 ## The longer references
 
-These notes are a changelog. The living references stay where they are:
+These notes are a changelog. The living references now live in
+[v1/](v1/) — moved out of the repository root, still tracked:
 
-- [PRIVILEGED_AUDIT_DOCS.md](../PRIVILEGED_AUDIT_DOCS.md)
-- [HIERARCHY_SYNC_DOCS.md](../HIERARCHY_SYNC_DOCS.md)
-- [HIERARCHY_MOVES_GUIDE.md](../HIERARCHY_MOVES_GUIDE.md)
-- [PRINCIPAL_OFFICERS_DOCS.md](../PRINCIPAL_OFFICERS_DOCS.md)
-- [CONFIGURATION.md](../CONFIGURATION.md) — every environment variable
+- [PRIVILEGED_AUDIT_DOCS.md](v1/PRIVILEGED_AUDIT_DOCS.md)
+- [HIERARCHY_SYNC_DOCS.md](v1/HIERARCHY_SYNC_DOCS.md)
+- [HIERARCHY_MOVES_GUIDE.md](v1/HIERARCHY_MOVES_GUIDE.md)
+- [PRINCIPAL_OFFICERS_DOCS.md](v1/PRINCIPAL_OFFICERS_DOCS.md)
+- [CONFIGURATION.md](v1/CONFIGURATION.md) — every environment variable
